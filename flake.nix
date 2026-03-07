@@ -77,6 +77,7 @@
           devShells.default = craneLib.devShell {
             packages = [
               config.formatter
+              pkgs.fd
               pkgs.just
               pkgs.taplo
               pkgs.cargo-hack
