@@ -9,7 +9,7 @@ check:
     fd --hidden --extension=toml --exec-batch taplo format --check
     fd --hidden --extension=toml --exec-batch taplo lint
     # TODO: figure out how to run cargo +nightly fmt within nix direnv
-    rustup run nightly rustfmt --edition=2024 src/main.rs --check
+    rustup run --install nightly rustfmt --edition=2024 src/main.rs --check
     @just clippy
     cargo shear
 
@@ -20,7 +20,7 @@ fmt:
     fd --type=file --hidden --extension=md --extension=yml --exec-batch prettier --write
     fd --hidden --extension=toml --exec-batch taplo format
     # TODO: figure out how to run cargo +nightly fmt within nix direnv
-    rustup run nightly rustfmt --edition=2024 src/main.rs
+    rustup run --install nightly rustfmt --edition=2024 src/main.rs
 
 clippy:
     cargo clippy -- --deny=warnings --deny=clippy::todo
