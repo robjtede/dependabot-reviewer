@@ -1,13 +1,13 @@
-extern crate serde_json;
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 use console::style;
 use dialoguer::{theme::ColorfulTheme, Confirm, FuzzySelect};
-use serde_json::Value;
+use octocrab::Octocrab;
 
 use std::collections::HashMap;
 use std::io::IsTerminal;
 use std::process::Command;
+use std::sync::Arc;
 
 #[derive(Parser, Debug)]
 #[command(name = "dependabot-reviewer")]
@@ -50,12 +50,57 @@ impl PrInfo {
 struct App {
     cli: Cli,
     verbose: bool,
+    octocrab: Arc<Octocrab>,
 }
 
 impl App {
     fn new(cli: Cli) -> Result<Self> {
         let verbose = cli.verbose;
-        Ok(Self { cli, verbose })
+        let mut token = std::env::var("GITHUB_TOKEN").ok();
+
+        if token.is_none() {
+            let gh_check = Command::new("gh").arg("--version").output();
+
+            if gh_check.is_ok() {
+                if std::io::stdin().is_terminal() {
+                    let use_gh = Confirm::with_theme(&ColorfulTheme::default())
+                        .with_prompt("GITHUB_TOKEN not found. Try to use 'gh auth token'?")
+                        .default(true)
+                        .interact()
+                        .unwrap_or(false);
+
+                    if use_gh {
+                        let output = Command::new("gh")
+                            .args(["auth", "token"])
+                            .output()
+                            .context("Failed to run 'gh auth token'")?;
+
+                        if output.status.success() {
+                            let t = String::from_utf8(output.stdout)?.trim().to_string();
+                            if !t.is_empty() {
+                                token = Some(t);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut builder = Octocrab::builder();
+        if let Some(token) = token {
+            builder = builder.personal_token(token);
+        } else {
+            return Err(anyhow!(
+                "GITHUB_TOKEN is required. Please set it or authenticate with 'gh auth login'."
+            ));
+        }
+
+        let octocrab = Arc::new(builder.build()?);
+        Ok(Self {
+            cli,
+            verbose,
+            octocrab,
+        })
     }
 
     fn debug(&self, msg: &str) {
@@ -64,70 +109,42 @@ impl App {
         }
     }
 
-    fn run_gh_json(&self, args: &[&str]) -> Result<Value> {
-        self.debug(&format!("Running: gh {}", args.join(" ")));
-
-        let output = Command::new("gh")
-            .args(args)
-            .output()
-            .context("Failed to execute gh command. Is it installed and authenticated?")?;
-
-        if !output.status.success() {
-            let error = String::from_utf8_lossy(&output.stderr);
-            let cmd = format!("gh {}", args.join(" "));
-            self.debug(&format!("Command failed: {}", cmd));
-            self.debug(&format!("Error: {}", error));
-            return Err(anyhow!("gh command failed: {}", error));
-        }
-
-        let stdout = String::from_utf8(output.stdout).context("gh output is not valid UTF-8")?;
-
-        if stdout.trim().is_empty() {
-            return Ok(Value::Array(vec![]));
-        }
-
-        serde_json::from_str(&stdout).context("Failed to parse gh JSON output")
-    }
-
-    fn fetch_dependabot_prs_for_repo(&self, repo: &str) -> Result<Vec<PrInfo>> {
+    async fn fetch_dependabot_prs_for_repo(&self, repo: &str) -> Result<Vec<PrInfo>> {
         self.debug(&format!("Fetching PRs for {}", repo));
 
-        let json = self
-            .run_gh_json(&[
-                "pr",
-                "list",
-                "--repo",
-                repo,
-                "--author",
-                "dependabot[bot]",
-                "--state",
-                "open",
-                "--json",
-                "number,title,url",
-            ])
+        let (owner, repo_name) = repo
+            .split_once('/')
+            .ok_or_else(|| anyhow!("Invalid repo format: {}", repo))?;
+
+        let prs_page = self
+            .octocrab
+            .pulls(owner, repo_name)
+            .list()
+            .state(octocrab::params::State::Open)
+            .send()
+            .await
             .map_err(|e| anyhow!("Failed to fetch PRs for {}: {}", repo, e))?;
 
-        let mut prs = Vec::new();
-        if let Value::Array(items) = json {
-            for item in items {
-                if let (Some(number), Some(title), Some(url)) = (
-                    item.get("number").and_then(|v| v.as_u64()),
-                    item.get("title").and_then(|v| v.as_str()),
-                    item.get("url").and_then(|v| v.as_str()),
-                ) {
-                    prs.push(PrInfo {
-                        number,
-                        title: title.to_string(),
-                        url: url.to_string(),
-                    });
-                }
-            }
-        }
+        let prs = prs_page
+            .items
+            .into_iter()
+            .filter(|pr| {
+                pr.user
+                    .as_ref()
+                    .map(|u| u.login == "dependabot[bot]")
+                    .unwrap_or(false)
+            })
+            .map(|pr| PrInfo {
+                number: pr.number,
+                title: pr.title.unwrap_or_default(),
+                url: pr.html_url.map(|u| u.to_string()).unwrap_or_default(),
+            })
+            .collect();
 
         Ok(prs)
     }
 
-    fn aggregate_repos_with_counts(&self) -> Result<HashMap<String, usize>> {
+    async fn aggregate_repos_with_counts(&self) -> Result<HashMap<String, usize>> {
         self.debug("Aggregating repos with PR counts");
 
         let mut repo_counts: HashMap<String, usize> = HashMap::new();
@@ -135,30 +152,21 @@ impl App {
         for org in &self.cli.org {
             self.debug(&format!("Searching organization: {}", org));
 
-            let json = self
-                .run_gh_json(&[
-                    "search",
-                    "prs",
-                    "--owner",
-                    org,
-                    "--author",
-                    "dependabot[bot]",
-                    "--state",
-                    "open",
-                    "--json",
-                    "repository",
-                ])
+            let query = format!("org:{} author:dependabot[bot] is:pr is:open", org);
+            let page = self
+                .octocrab
+                .search()
+                .issues_and_pull_requests(&query)
+                .send()
+                .await
                 .map_err(|e| anyhow!("Failed to search PRs in {}: {}", org, e))?;
 
-            if let Value::Array(items) = json {
-                for item in items {
-                    if let Some(repo_obj) = item.get("repository") {
-                        if let Some(name_with_owner) =
-                            repo_obj.get("nameWithOwner").and_then(|v| v.as_str())
-                        {
-                            *repo_counts.entry(name_with_owner.to_string()).or_insert(0) += 1;
-                        }
-                    }
+            for issue in page.items {
+                // The repository URL is usually something like https://api.github.com/repos/owner/repo
+                let repo_url = &issue.repository_url;
+                let path = repo_url.path();
+                if let Some(name_with_owner) = path.strip_prefix("/repos/") {
+                    *repo_counts.entry(name_with_owner.to_string()).or_insert(0) += 1;
                 }
             }
         }
@@ -217,14 +225,14 @@ impl App {
         Ok(Some(repo))
     }
 
-    fn process_repository(&self, repo: &str) -> Result<()> {
+    async fn process_repository(&self, repo: &str) -> Result<()> {
         println!(
             "{} Processing {}",
             style("→").cyan(),
             style(repo).green().bold()
         );
 
-        let prs = self.fetch_dependabot_prs_for_repo(repo)?;
+        let prs = self.fetch_dependabot_prs_for_repo(repo).await?;
 
         if prs.is_empty() {
             println!("  No open Dependabot PRs found in {}", repo);
@@ -288,23 +296,16 @@ impl App {
                 println!("  [DRY RUN] Would comment on PR #{}: {}", pr.number, pr.url);
             } else {
                 self.debug(&format!("Commenting on PR #{}", pr.number));
-                let output = Command::new("gh")
-                    .args([
-                        "pr",
-                        "comment",
-                        "--repo",
-                        repo,
-                        &pr.number.to_string(),
-                        "--body",
-                        "@dependabot rebase",
-                    ])
-                    .output()
-                    .context("Failed to execute gh pr comment")?;
 
-                if !output.status.success() {
-                    let error = String::from_utf8_lossy(&output.stderr);
-                    return Err(anyhow!("Failed to comment on PR #{}: {}", pr.number, error));
-                }
+                let (owner, repo_name) = repo
+                    .split_once('/')
+                    .ok_or_else(|| anyhow!("Invalid repo format: {}", repo))?;
+
+                self.octocrab
+                    .issues(owner, repo_name)
+                    .create_comment(pr.number, "@dependabot rebase")
+                    .await
+                    .context("Failed to comment on PR")?;
 
                 println!(
                     "  {} Commented on PR #{}{}",
@@ -318,14 +319,14 @@ impl App {
         Ok(())
     }
 
-    fn run(&self) -> Result<()> {
+    async fn run(&self) -> Result<()> {
         self.debug("Starting dependabot-reviewer");
 
         let selected_repo = if let Some(repo) = &self.cli.repo {
             self.debug(&format!("Using specified repository: {}", repo));
             Some(repo.clone())
         } else {
-            let repo_counts = self.aggregate_repos_with_counts()?;
+            let repo_counts = self.aggregate_repos_with_counts().await?;
 
             if repo_counts.is_empty() {
                 println!("No open Dependabot PRs found in any repository.");
@@ -358,7 +359,7 @@ impl App {
         };
 
         if let Some(repo) = selected_repo {
-            self.process_repository(&repo)?;
+            self.process_repository(&repo).await?;
         }
 
         println!();
@@ -375,11 +376,12 @@ impl App {
     }
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     let app = App::new(cli)?;
-    app.run()?;
+    app.run().await?;
 
     Ok(())
 }
