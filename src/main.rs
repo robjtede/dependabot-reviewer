@@ -3,11 +3,11 @@ use std::{collections::HashMap, io::IsTerminal as _, process::Command};
 use clap::Parser;
 use console::style;
 use derive_more::Display;
-use dialoguer::{theme::ColorfulTheme, Confirm, FuzzySelect};
+use dialoguer::{theme::ColorfulTheme, Confirm, FuzzySelect, Select};
 use error_stack::{Report, ResultExt as _};
 use futures_buffered::BufferedStreamExt;
-use futures_util::StreamExt as _;
-use octocrab::Octocrab;
+use futures_util::{FutureExt, StreamExt as _};
+use octocrab::{models::pulls::ReviewAction, params::pulls::MergeMethod, Octocrab};
 
 #[derive(Debug, Display)]
 pub enum AppError {
@@ -28,6 +28,9 @@ pub enum AppError {
 
     #[display("Invalid input provided")]
     InvalidInput,
+
+    #[display("Action selection failed")]
+    ActionSelection,
 }
 
 impl_more::impl_leaf_error!(AppError);
@@ -56,6 +59,10 @@ struct Cli {
     #[arg(short, long)]
     verbose: bool,
 
+    /// Allow selecting actions via dialog
+    #[arg(skip)]
+    action: Option<Action>,
+
     /// Recreate PRs instead of rebasing them.
     #[arg(long)]
     recreate: bool,
@@ -66,6 +73,13 @@ struct PrInfo {
     number: u64,
     title: String,
     url: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum Action {
+    ApproveMerge,
+    Rebase,
+    Recreate,
 }
 
 impl PrInfo {
@@ -275,64 +289,29 @@ impl App {
         }
         println!();
 
-        let should_comment = if self.cli.confirm {
-            if !std::io::stdin().is_terminal() {
-                return Err(Report::new(AppError::InvalidInput))
-                    .attach("Cannot use --confirm in non-interactive mode");
-            }
-            let mut answers = Vec::new();
-
-            for pr in &prs {
-                let answer = Confirm::with_theme(&ColorfulTheme::default())
-                    .with_prompt(format!(
-                        "Comment '@dependabot {}' on PR #{}?",
-                        if self.cli.recreate {
-                            "recreate"
-                        } else {
-                            "rebase"
-                        },
-                        pr.number
-                    ))
-                    .default(false)
-                    .interact()
-                    .map_err(|_| Report::new(AppError::Interactive))?;
-                answers.push(answer);
-            }
-
-            answers
-        } else {
-            let all = prs.len();
-            if std::io::stdin().is_terminal() {
-                let proceed = Confirm::with_theme(&ColorfulTheme::default())
-                    .with_prompt(format!(
-                        "Comment '@dependabot {}' on all {} PR(s) in {}?",
-                        if self.cli.recreate {
-                            "recreate"
-                        } else {
-                            "rebase"
-                        },
-                        all,
-                        repo
-                    ))
-                    .default(false)
-                    .interact()
-                    .change_context(AppError::Interactive)
-                    .attach("Confirmation failed")?;
-                vec![proceed; all]
-            } else {
-                vec![true; all]
+        // Show action dialog after listing PRs
+        let action = {
+            let items = vec!["Approve + Merge", "Rebase", "Recreate"];
+            let selection = Select::with_theme(&ColorfulTheme::default())
+                .with_prompt("Choose action to apply to these PRs")
+                .items(&items)
+                .default(0)
+                .interact()
+                .change_context(AppError::ActionSelection)
+                .attach("Action selection failed")?;
+            match selection {
+                0 => Action::ApproveMerge,
+                1 => Action::Rebase,
+                2 => Action::Recreate,
+                _ => unreachable!(),
             }
         };
 
         let mut commented = false;
         let mut comment_tasks = Vec::new();
+        let mut merge_tasks = Vec::new();
 
-        for (pr, should) in prs.iter().zip(should_comment.iter()) {
-            if !should {
-                self.debug(&format!("Skipping PR #{}", pr.number));
-                continue;
-            }
-
+        for pr in &prs {
             if self.cli.dry_run {
                 println!("  [DRY RUN] Would comment on PR #{}: {}", pr.number, pr.url);
             } else {
@@ -345,24 +324,110 @@ impl App {
                 let repo_name = repo_name.to_string();
                 let pr_number = pr.number;
                 let octocrab = self.octocrab.clone();
-                let command = if self.cli.recreate {
-                    "@dependabot recreate"
-                } else {
-                    "@dependabot rebase"
-                };
 
-                comment_tasks.push(async move {
-                    self.debug(&format!("Commenting on PR #{}", pr.number));
+                match action {
+                    Action::Rebase => {
+                        comment_tasks.push(
+                            async move {
+                                self.debug(&format!("Commenting on PR #{}", pr.number));
 
-                    octocrab
-                        .issues(owner, repo_name)
-                        .create_comment(pr_number, command)
-                        .await
-                        .change_context(AppError::Comment)
-                        .attach(format!("Failed to comment on PR #{}", pr_number))?;
+                                octocrab
+                                    .issues(owner, repo_name)
+                                    .create_comment(pr_number, "@dependabot rebase")
+                                    .await
+                                    .change_context(AppError::Comment)
+                                    .attach(format!("Failed to comment on PR #{}", pr_number))?;
 
-                    Ok::<_, Report<_>>(pr_number)
-                });
+                                Ok::<_, Report<_>>(pr_number)
+                            }
+                            .boxed(),
+                        );
+                    }
+                    Action::Recreate => {
+                        comment_tasks.push(
+                            async move {
+                                self.debug(&format!("Commenting on PR #{}", pr.number));
+
+                                octocrab
+                                    .issues(owner, repo_name)
+                                    .create_comment(pr_number, "@dependabot recreate")
+                                    .await
+                                    .change_context(AppError::Comment)
+                                    .attach(format!("Failed to comment on PR #{}", pr_number))?;
+
+                                Ok::<_, Report<_>>(pr_number)
+                            }
+                            .boxed(),
+                        );
+                    }
+                    Action::ApproveMerge => {
+                        merge_tasks.push(async move {
+                            let repo = octocrab
+                                .repos(&owner, &repo_name)
+                                .get()
+                                .await
+                                .change_context(AppError::Comment)
+                                .attach(format!("Failed to approve PR #{}", pr_number))?;
+
+                            let merge_method =
+                                match (repo.allow_merge_commit, repo.allow_squash_merge) {
+                                    (Some(true), Some(true)) => MergeMethod::Merge,
+                                    (Some(true), Some(false)) => MergeMethod::Merge,
+                                    (Some(false), Some(true)) => MergeMethod::Squash,
+                                    _ => {
+                                        return Err(AppError::Comment).attach(format!(
+                                            "No merge method available for PR #{}",
+                                            pr_number
+                                        ))
+                                    }
+                                };
+
+                            self.debug(&format!("Approving PR #{}", pr.number));
+
+                            let pulls = octocrab.pulls(owner, repo_name);
+
+                            let pr = pulls
+                                .get(pr_number)
+                                .await
+                                .change_context(AppError::Comment)
+                                .attach(format!("Failed to approve PR #{}", pr_number))?;
+
+                            let head_sha = pr.head.sha;
+
+                            self.debug(&format!("Head commit: {head_sha}"));
+
+                            #[expect(deprecated)] // no alternative yet
+                            let pr = pulls.pull_number(pr_number);
+
+                            pr.reviews()
+                                .create_review(
+                                    head_sha.clone(),
+                                    "",
+                                    ReviewAction::Approve,
+                                    Vec::new(),
+                                )
+                                .await
+                                .change_context(AppError::Comment)
+                                .attach(format!("Failed to approve PR #{}", pr_number))?;
+
+                            self.debug(&format!(
+                                "Merging PR #{} using {:?}",
+                                pr_number, merge_method
+                            ));
+
+                            pulls
+                                .merge(pr_number)
+                                .sha(head_sha)
+                                .method(merge_method)
+                                .send()
+                                .await
+                                .change_context(AppError::Comment)
+                                .attach(format!("Failed to merge PR #{}", pr_number))?;
+
+                            Ok::<_, Report<_>>(pr_number)
+                        });
+                    }
+                }
             }
         }
 
@@ -373,6 +438,21 @@ impl App {
                 let pr_number = result?;
                 println!(
                     "  {} Commented on PR #{}{}",
+                    style("✓").green(),
+                    pr_number,
+                    style(format!(" ({})", repo)).dim()
+                );
+                commented = true;
+            }
+        }
+
+        if !merge_tasks.is_empty() {
+            let mut stream = futures_util::stream::iter(merge_tasks).buffered_unordered(5);
+
+            while let Some(result) = stream.next().await {
+                let pr_number = result?;
+                println!(
+                    "  {} Approved and merged PR #{}{}",
                     style("✓").green(),
                     pr_number,
                     style(format!(" ({})", repo)).dim()
