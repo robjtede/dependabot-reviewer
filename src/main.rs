@@ -177,22 +177,37 @@ impl App {
     ) -> Result<HashMap<String, usize>, Report<AppError>> {
         self.debug("Aggregating repos with PR counts");
 
-        let mut repo_counts: HashMap<String, usize> = HashMap::new();
+        let mut repo_counts = HashMap::new();
+        let mut search_tasks = Vec::new();
 
         for org in &self.cli.org {
-            self.debug(&format!("Searching organization: {}", org));
+            let org = org.clone();
+            let octocrab = self.octocrab.clone();
+            let verbose = self.cli.verbose;
 
-            let query = format!("org:{} author:dependabot[bot] is:pr is:open", org);
-            let page = self
-                .octocrab
-                .search()
-                .issues_and_pull_requests(&query)
-                .send()
-                .await
-                .change_context(AppError::Search)
-                .attach_with(|| format!("Failed to search PRs in {}", org))?;
+            search_tasks.push(async move {
+                if verbose {
+                    eprintln!("DEBUG: Searching organization: {}", org);
+                }
 
-            for issue in page.items {
+                let query = format!("org:{} author:dependabot[bot] is:pr is:open", org);
+                let page = octocrab
+                    .search()
+                    .issues_and_pull_requests(&query)
+                    .send()
+                    .await
+                    .change_context(AppError::Search)
+                    .attach_with(|| format!("Failed to search PRs in {}", org))?;
+
+                Ok::<_, Report<AppError>>(page.items)
+            });
+        }
+
+        let mut stream = futures_util::stream::iter(search_tasks).buffered_unordered(5);
+
+        while let Some(result) = stream.next().await {
+            let items = result?;
+            for issue in items {
                 let repo_url = &issue.repository_url;
                 let path = repo_url.path();
                 if let Some(name_with_owner) = path.strip_prefix("/repos/") {
@@ -214,21 +229,7 @@ impl App {
             .map(|(repo, count)| format!("{} ({} PRs)", repo, count))
             .collect();
 
-        items.sort_by(|a, b| {
-            let count_a = a
-                .rsplit(" (")
-                .next()
-                .and_then(|s| s.strip_suffix(" PRs)"))
-                .and_then(|s| s.parse::<usize>().ok())
-                .unwrap_or(0);
-            let count_b = b
-                .rsplit(" (")
-                .next()
-                .and_then(|s| s.strip_suffix(" PRs)"))
-                .and_then(|s| s.parse::<usize>().ok())
-                .unwrap_or(0);
-            count_b.cmp(&count_a)
-        });
+        items.sort();
 
         if items.is_empty() {
             return Ok(None);
