@@ -1,6 +1,6 @@
 use std::{collections::HashMap, io::IsTerminal as _, process::Command, time::Duration};
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use console::style;
 use derive_more::Display;
 use dialoguer::{theme::ColorfulTheme, Confirm, FuzzySelect, Select};
@@ -59,13 +59,9 @@ struct Cli {
     #[arg(short, long)]
     verbose: bool,
 
-    /// Allow selecting actions via dialog
-    #[arg(skip)]
+    /// Action to apply to PRs. If omitted, prompts interactively.
+    #[arg(short, long, value_enum)]
     action: Option<Action>,
-
-    /// Recreate PRs instead of rebasing them.
-    #[arg(long)]
-    recreate: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -75,7 +71,7 @@ struct PrInfo {
     url: String,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, ValueEnum)]
 enum Action {
     ApproveMerge,
     Rebase,
@@ -273,14 +269,14 @@ impl App {
         Ok(Some(repo))
     }
 
-    async fn process_repository(&self, repo: &str) -> Result<bool, Report<AppError>> {
+    async fn process_repository(&self, repo: &str) -> Result<Option<Action>, Report<AppError>> {
         println!("Fetching PR details for {}", repo);
 
         let prs = self.fetch_dependabot_prs_for_repo(repo).await?;
 
         if prs.is_empty() {
             println!("  No open Dependabot PRs found in {}", repo);
-            return Ok(false);
+            return Ok(None);
         }
 
         println!("  Found {} Dependabot PR(s):", prs.len());
@@ -289,8 +285,10 @@ impl App {
         }
         println!();
 
-        // Show action dialog after listing PRs
-        let action = {
+        // Use CLI-provided action or prompt interactively
+        let action = if let Some(action) = self.cli.action {
+            action
+        } else {
             let items = vec!["Approve + Merge", "Rebase", "Recreate"];
             let selection = Select::with_theme(&ColorfulTheme::default())
                 .with_prompt("Choose action to apply to these PRs")
@@ -307,7 +305,7 @@ impl App {
             }
         };
 
-        let mut commented = false;
+        let mut performed_action = None;
         let mut comment_tasks = Vec::new();
         let mut merge_infos: Vec<(String, String, u64)> = Vec::new();
 
@@ -378,7 +376,7 @@ impl App {
                     pr_number,
                     style(format!(" ({})", repo)).dim()
                 );
-                commented = true;
+                performed_action = Some(action);
             }
         }
 
@@ -458,7 +456,7 @@ impl App {
                                 pr_number,
                                 style(format!(" ({})", repo)).dim()
                             );
-                            commented = true;
+                            performed_action = Some(action);
                             break;
                         }
                         Err(e) if attempt < MAX_ATTEMPTS => {
@@ -482,7 +480,7 @@ impl App {
             }
         }
 
-        Ok(commented)
+        Ok(performed_action)
     }
 
     async fn run(&self) -> Result<(), Report<AppError>> {
@@ -522,9 +520,9 @@ impl App {
             }
         };
 
-        let mut commented = false;
+        let mut performed_action = None;
         if let Some(repo) = selected_repo {
-            commented = self.process_repository(&repo).await?;
+            performed_action = self.process_repository(&repo).await?;
         }
 
         println!();
@@ -532,16 +530,20 @@ impl App {
 
         if self.cli.dry_run {
             println!("Run without --dry-run to actually comment on PRs.");
-        } else if commented {
-            println!(
-                "Dependabot will {} each PR automatically.",
-                if self.cli.recreate {
-                    "recreate"
-                } else {
-                    "rebase"
+        } else if let Some(action) = performed_action {
+            match action {
+                Action::ApproveMerge => {
+                    println!("All selected PRs have been approved and merged.");
                 }
-            );
-            println!("You can monitor the progress in the PRs.");
+                Action::Rebase => {
+                    println!("Dependabot will rebase each PR automatically.");
+                    println!("You can monitor the progress in the PRs.");
+                }
+                Action::Recreate => {
+                    println!("Dependabot will recreate each PR automatically.");
+                    println!("You can monitor the progress in the PRs.");
+                }
+            }
         }
 
         Ok(())
