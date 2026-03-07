@@ -34,7 +34,7 @@ impl_more::impl_leaf_error!(AppError);
 
 #[derive(Parser, Debug)]
 #[command(name = "dependabot-reviewer")]
-#[command(about = "Mass rebase Dependabot PRs across repositories", long_about = None)]
+#[command(about = "Mass rebase or recreate Dependabot PRs across repositories", long_about = None)]
 struct Cli {
     /// GitHub organizations to search (can be used multiple times).
     #[arg(short, long, default_values = ["actix", "robjtede", "x52dev"])]
@@ -55,6 +55,10 @@ struct Cli {
     /// Enable verbose debug logging.
     #[arg(short, long)]
     verbose: bool,
+
+    /// Recreate PRs instead of rebasing them.
+    #[arg(long)]
+    recreate: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -175,7 +179,7 @@ impl App {
     async fn aggregate_repos_with_counts(
         &self,
     ) -> Result<HashMap<String, usize>, Report<AppError>> {
-        self.debug("Aggregating repos with PR counts");
+        println!("Finding dependabot PRs for {} orgs", self.cli.org.len());
 
         let mut repo_counts = HashMap::new();
         let mut search_tasks = Vec::new();
@@ -239,7 +243,7 @@ impl App {
         println!();
 
         let selection = FuzzySelect::with_theme(&ColorfulTheme::default())
-            .with_prompt("Select a repository")
+            .with_prompt("Choose a repository")
             .items(&items)
             .interact()
             .change_context(AppError::Interactive)
@@ -256,11 +260,7 @@ impl App {
     }
 
     async fn process_repository(&self, repo: &str) -> Result<bool, Report<AppError>> {
-        println!(
-            "{} Processing {}",
-            style("→").cyan(),
-            style(repo).green().bold()
-        );
+        println!("Fetching PR details for {}", repo);
 
         let prs = self.fetch_dependabot_prs_for_repo(repo).await?;
 
@@ -285,7 +285,12 @@ impl App {
             for pr in &prs {
                 let answer = Confirm::with_theme(&ColorfulTheme::default())
                     .with_prompt(format!(
-                        "Comment '@dependabot rebase' on PR #{}?",
+                        "Comment '@dependabot {}' on PR #{}?",
+                        if self.cli.recreate {
+                            "recreate"
+                        } else {
+                            "rebase"
+                        },
                         pr.number
                     ))
                     .default(false)
@@ -300,8 +305,14 @@ impl App {
             if std::io::stdin().is_terminal() {
                 let proceed = Confirm::with_theme(&ColorfulTheme::default())
                     .with_prompt(format!(
-                        "Comment '@dependabot rebase' on all {} PR(s) in {}?",
-                        all, repo
+                        "Comment '@dependabot {}' on all {} PR(s) in {}?",
+                        if self.cli.recreate {
+                            "recreate"
+                        } else {
+                            "rebase"
+                        },
+                        all,
+                        repo
                     ))
                     .default(false)
                     .interact()
@@ -334,13 +345,18 @@ impl App {
                 let repo_name = repo_name.to_string();
                 let pr_number = pr.number;
                 let octocrab = self.octocrab.clone();
+                let command = if self.cli.recreate {
+                    "@dependabot recreate"
+                } else {
+                    "@dependabot rebase"
+                };
 
                 comment_tasks.push(async move {
                     self.debug(&format!("Commenting on PR #{}", pr.number));
 
                     octocrab
                         .issues(owner, repo_name)
-                        .create_comment(pr_number, "@dependabot rebase")
+                        .create_comment(pr_number, command)
                         .await
                         .change_context(AppError::Comment)
                         .attach(format!("Failed to comment on PR #{}", pr_number))?;
@@ -416,7 +432,14 @@ impl App {
         if self.cli.dry_run {
             println!("Run without --dry-run to actually comment on PRs.");
         } else if commented {
-            println!("Dependabot will rebase each PR automatically.");
+            println!(
+                "Dependabot will {} each PR automatically.",
+                if self.cli.recreate {
+                    "recreate"
+                } else {
+                    "rebase"
+                }
+            );
             println!("You can monitor the progress in the PRs.");
         }
 
