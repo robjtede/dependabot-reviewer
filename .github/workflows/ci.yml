@@ -18,7 +18,9 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
-
+    permissions:
+      id-token: write
+      contents: read
     steps:
       - uses: actions/checkout@v6
 
@@ -35,3 +37,6 @@ jobs:
 
       - name: Check
         run: just check
+
+      - name: Build
+        run: just build
