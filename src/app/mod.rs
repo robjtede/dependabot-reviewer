@@ -5,7 +5,7 @@ mod process;
 use std::{io::IsTerminal as _, process::Command};
 
 use console::style;
-use dialoguer::{theme::ColorfulTheme, Confirm};
+use dialoguer::{Confirm, theme::ColorfulTheme};
 use error_stack::{Report, ResultExt as _};
 use octocrab::Octocrab;
 

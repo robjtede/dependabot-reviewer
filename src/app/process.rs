@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use console::style;
-use dialoguer::{theme::ColorfulTheme, Select};
+use dialoguer::{Select, theme::ColorfulTheme};
 use error_stack::{Report, ResultExt as _};
 use futures_buffered::BufferedStreamExt;
 use futures_util::{FutureExt as _, StreamExt as _};

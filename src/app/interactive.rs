@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use dialoguer::{theme::ColorfulTheme, FuzzySelect};
+use dialoguer::{FuzzySelect, theme::ColorfulTheme};
 use error_stack::{Report, ResultExt as _};
 
 use super::App;
