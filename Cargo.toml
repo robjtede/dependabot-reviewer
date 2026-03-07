@@ -9,8 +9,8 @@ console = "0.16"
 derive_more = { version = "2", features = ["display"] }
 dialoguer = { version = "0.12", features = ["fuzzy-select"] }
 error-stack = "0.6"
-futures-util = { version ="0.3", default-features = false, features = ["std"] }
 futures-buffered = "0.2"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 impl-more = "0.3"
 octocrab = "0.49"
 tokio = { version = "1", features = ["full"] }

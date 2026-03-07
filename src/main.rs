@@ -1,4 +1,4 @@
-use std::{collections::HashMap, io::IsTerminal as _, process::Command, sync::Arc};
+use std::{collections::HashMap, io::IsTerminal as _, process::Command};
 
 use clap::Parser;
 use console::style;
@@ -37,7 +37,7 @@ impl_more::impl_leaf_error!(AppError);
 #[command(about = "Mass rebase Dependabot PRs across repositories", long_about = None)]
 struct Cli {
     /// GitHub organizations to search (can be used multiple times).
-    #[arg(short, long, default_value = "x52dev")]
+    #[arg(short, long, default_values = ["actix", "robjtede", "x52dev"])]
     org: Vec<String>,
 
     /// Specific repository to process (owner/repo).
@@ -72,13 +72,11 @@ impl PrInfo {
 
 struct App {
     cli: Cli,
-    verbose: bool,
-    octocrab: Arc<Octocrab>,
+    octocrab: Octocrab,
 }
 
 impl App {
     fn new(cli: Cli) -> Result<Self, Report<AppError>> {
-        let verbose = cli.verbose;
         let mut token = std::env::var("GITHUB_TOKEN").ok();
 
         if token.is_none() && !cli.dry_run {
@@ -120,22 +118,16 @@ impl App {
             ));
         }
 
-        let octocrab = Arc::new(
-            builder
-                .build()
-                .change_context(AppError::Initialization)
-                .attach("Failed to build Octocrab client")?,
-        );
+        let octocrab = builder
+            .build()
+            .change_context(AppError::Initialization)
+            .attach("Failed to build Octocrab client")?;
 
-        Ok(Self {
-            cli,
-            verbose,
-            octocrab,
-        })
+        Ok(Self { cli, octocrab })
     }
 
     fn debug(&self, msg: &str) {
-        if self.verbose {
+        if self.cli.verbose {
             eprintln!("DEBUG: {}", msg);
         }
     }
@@ -340,19 +332,19 @@ impl App {
                 let owner = owner.to_string();
                 let repo_name = repo_name.to_string();
                 let pr_number = pr.number;
-                let octocrab = Arc::clone(&self.octocrab);
+                let octocrab = self.octocrab.clone();
 
                 comment_tasks.push(async move {
+                    self.debug(&format!("Commenting on PR #{}", pr.number));
+
                     octocrab
                         .issues(owner, repo_name)
                         .create_comment(pr_number, "@dependabot rebase")
                         .await
                         .change_context(AppError::Comment)
-                        .map_err(|report| {
-                            report.attach(format!("Failed to comment on PR #{}", pr_number))
-                        })?;
+                        .attach(format!("Failed to comment on PR #{}", pr_number))?;
 
-                    Ok::<u64, Report<AppError>>(pr_number)
+                    Ok::<_, Report<_>>(pr_number)
                 });
             }
         }
