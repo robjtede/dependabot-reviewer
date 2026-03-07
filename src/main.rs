@@ -80,7 +80,7 @@ enum Action {
 
 impl PrInfo {
     fn display(&self) -> String {
-        format!("#{}: {}", self.number, self.title)
+        format!("#{}: {}\n      {}", self.number, self.title, self.url)
     }
 }
 
