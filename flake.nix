@@ -69,41 +69,19 @@
             inherit dependabot-reviewer;
           };
 
-          # ── Checks ──────────────────────────────────────────────────────────
-          # Each check is a separate derivation; all reuse cargoArtifacts so
-          # only the incremental delta is compiled.  Run with:
-          #   nix flake check
-          checks = {
-            # Build + test the package itself as a check.
-            inherit dependabot-reviewer;
-
-            # Formatting – no cargoArtifacts needed; very fast.
-            dependabot-reviewer-fmt = craneLib.cargoFmt {
-              inherit src;
-            };
-
-            # Clippy – deny all warnings to keep the linter actionable.
-            dependabot-reviewer-clippy = craneLib.cargoClippy (commonArgs // {
-              inherit cargoArtifacts;
-              cargoClippyExtraArgs = "--all-targets -- --deny warnings";
-            });
-          };
-
           # ── Dev shell ────────────────────────────────────────────────────────
           # craneLib.devShell automatically provides cargo, rustc, clippy and
           # rustfmt from the same toolchain used to build.  Passing `checks`
           # here means all build inputs from above checks are available
           # interactively.
           devShells.default = craneLib.devShell {
-            checks = config.checks;
-
             packages = [
-              pkgs.nixpkgs-fmt
+              config.formatter
+              pkgs.just
+              pkgs.taplo
               pkgs.cargo-hack
               pkgs.cargo-shear
-              pkgs.just
               pkgs.nodePackages.prettier
-              pkgs.taplo
             ];
           };
 

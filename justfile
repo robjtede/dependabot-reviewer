@@ -1,7 +1,7 @@
 _list:
     @just --list
 
-# Check project
+# Check project.
 check:
     just --unstable --fmt --check
     nixpkgs-fmt --check .
@@ -12,7 +12,7 @@ check:
     @just clippy
     cargo shear
 
-# Format project
+# Format project.
 fmt:
     just --unstable --fmt
     nixpkgs-fmt .
@@ -23,6 +23,10 @@ fmt:
 clippy:
     cargo clippy -- --deny=warnings --deny=clippy::todo
 
-# Run the binary (passes arguments to the app)
+# Run the binary via Nix (passes arguments to the app).
 run *args:
     nix run . -- {{ args }}
+
+# Build the binary in Nix.
+build:
+    nix build --no-link --print-out-paths .
