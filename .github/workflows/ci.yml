@@ -16,40 +16,22 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Install Rust stable
-        uses: actions-rust-lang/setup-rust-toolchain@v1.15.3
-        with:
-          toolchain: stable
-
-      - name: Install just
-        uses: taiki-e/install-action@v2.68.15
-        with:
-          tool: just
-
-      - name: Test
-        run: just test
-
   check:
     runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install Rust nightly
-        uses: actions-rust-lang/setup-rust-toolchain@v1.15.3
+      - name: Install Determinate Nix
+        uses: DeterminateSystems/determinate-nix-action@v3
         with:
-          toolchain: nightly
+          extra-conf: lazy-trees = true
 
-      - name: Install just
-        uses: taiki-e/install-action@v2.68.15
-        with:
-          tool: just
+      - name: Set up FlakeHub Cache
+        uses: DeterminateSystems/flakehub-cache-action@v3
+
+      - name: Enter Nix devshell
+        uses: nicknovitski/nix-develop@v1.2.1
 
       - name: Check
         run: just check
