@@ -7,10 +7,8 @@ use futures_buffered::BufferedStreamExt;
 use futures_util::{FutureExt as _, StreamExt as _};
 use octocrab::{models::pulls::ReviewAction, params::pulls::MergeMethod};
 
-use crate::cli::Action;
-use crate::error::AppError;
-
 use super::App;
+use crate::{cli::Action, error::AppError};
 
 impl App {
     pub(crate) async fn process_repository(

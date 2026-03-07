@@ -2,16 +2,17 @@ mod fetch;
 mod interactive;
 mod process;
 
-use std::io::IsTerminal as _;
-use std::process::Command;
+use std::{io::IsTerminal as _, process::Command};
 
 use console::style;
 use dialoguer::{theme::ColorfulTheme, Confirm};
 use error_stack::{Report, ResultExt as _};
 use octocrab::Octocrab;
 
-use crate::cli::{Action, Cli};
-use crate::error::AppError;
+use crate::{
+    cli::{Action, Cli},
+    error::AppError,
+};
 
 pub struct App {
     pub(crate) cli: Cli,

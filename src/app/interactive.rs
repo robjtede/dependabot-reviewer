@@ -3,9 +3,8 @@ use std::collections::HashMap;
 use dialoguer::{theme::ColorfulTheme, FuzzySelect};
 use error_stack::{Report, ResultExt as _};
 
-use crate::error::AppError;
-
 use super::App;
+use crate::error::AppError;
 
 impl App {
     pub(crate) fn select_repository_interactive(

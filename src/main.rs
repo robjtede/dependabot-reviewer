@@ -6,9 +6,7 @@ mod github;
 use clap::Parser as _;
 use error_stack::Report;
 
-use crate::app::App;
-use crate::cli::Cli;
-use crate::error::AppError;
+use crate::{app::App, cli::Cli, error::AppError};
 
 #[tokio::main]
 async fn main() -> Result<(), Report<AppError>> {

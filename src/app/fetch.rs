@@ -5,10 +5,11 @@ use futures_buffered::BufferedStreamExt as _;
 use futures_util::StreamExt as _;
 use octocrab::{models::StatusState, params::repos::Reference};
 
-use crate::error::AppError;
-use crate::github::{CiStatus, PrInfo};
-
 use super::App;
+use crate::{
+    error::AppError,
+    github::{CiStatus, PrInfo},
+};
 
 impl App {
     pub(crate) async fn fetch_ci_status(&self, owner: &str, repo: &str, branch: &str) -> CiStatus {
