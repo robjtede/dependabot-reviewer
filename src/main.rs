@@ -1,61 +1,58 @@
+use std::{collections::HashMap, io::IsTerminal as _, process::Command, sync::Arc};
+
 use clap::Parser;
 use console::style;
+use derive_more::Display;
 use dialoguer::{theme::ColorfulTheme, Confirm, FuzzySelect};
-use error_stack::{report, Result, ResultExt as _};
+use error_stack::{Report, ResultExt as _};
+use futures_buffered::BufferedStreamExt;
+use futures_util::StreamExt as _;
 use octocrab::Octocrab;
 
-use std::collections::HashMap;
-use std::fmt;
-use std::io::IsTerminal as _;
-use std::process::Command;
-use std::sync::Arc;
-
-#[derive(Debug)]
+#[derive(Debug, Display)]
 pub enum AppError {
+    #[display("Failed to initialize application")]
     Initialization,
+
+    #[display("GitHub API error")]
     GitHubApi,
+
+    #[display("Failed to search for PRs")]
     Search,
+
+    #[display("Failed to comment on PR")]
     Comment,
+
+    #[display("Interactive prompt failed")]
     Interactive,
+
+    #[display("Invalid input provided")]
     InvalidInput,
 }
 
-impl fmt::Display for AppError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            AppError::Initialization => write!(f, "Failed to initialize application"),
-            AppError::GitHubApi => write!(f, "GitHub API error"),
-            AppError::Search => write!(f, "Failed to search for PRs"),
-            AppError::Comment => write!(f, "Failed to comment on PR"),
-            AppError::Interactive => write!(f, "Interactive prompt failed"),
-            AppError::InvalidInput => write!(f, "Invalid input provided"),
-        }
-    }
-}
-
-impl error_stack::Context for AppError {}
+impl_more::impl_leaf_error!(AppError);
 
 #[derive(Parser, Debug)]
 #[command(name = "dependabot-reviewer")]
 #[command(about = "Mass rebase Dependabot PRs across repositories", long_about = None)]
 struct Cli {
-    /// GitHub organizations to search (can be used multiple times)
+    /// GitHub organizations to search (can be used multiple times).
     #[arg(short, long, default_value = "x52dev")]
     org: Vec<String>,
 
-    /// Specific repository to process (owner/repo)
+    /// Specific repository to process (owner/repo).
     #[arg(short, long)]
     repo: Option<String>,
 
-    /// Require confirmation before commenting on each PR
+    /// Require confirmation before commenting on each PR.
     #[arg(short, long)]
     confirm: bool,
 
-    /// Dry run - show what would be done without actually commenting
+    /// Dry run - show what would be done without actually commenting.
     #[arg(short, long)]
     dry_run: bool,
 
-    /// Enable verbose debug logging
+    /// Enable verbose debug logging.
     #[arg(short, long)]
     verbose: bool,
 }
@@ -80,7 +77,7 @@ struct App {
 }
 
 impl App {
-    fn new(cli: Cli) -> Result<Self, AppError> {
+    fn new(cli: Cli) -> Result<Self, Report<AppError>> {
         let verbose = cli.verbose;
         let mut token = std::env::var("GITHUB_TOKEN").ok();
 
@@ -90,16 +87,16 @@ impl App {
             if gh_check.is_ok() && std::io::stdin().is_terminal() {
                 let use_gh = Confirm::with_theme(&ColorfulTheme::default())
                     .with_prompt("GITHUB_TOKEN not found. Try to use 'gh auth token'?")
-                    .default(true)
+                    .default(false)
                     .interact()
-                    .map_err(|_| report!(AppError::Interactive))?;
+                    .map_err(|_| Report::new(AppError::Interactive))?;
 
                 if use_gh {
                     let output = Command::new("gh")
                         .args(["auth", "token"])
                         .output()
                         .change_context(AppError::Initialization)
-                        .attach_printable("Failed to run 'gh auth token'")?;
+                        .attach("Failed to run 'gh auth token'")?;
 
                     if output.status.success() {
                         let t = String::from_utf8(output.stdout)
@@ -118,16 +115,16 @@ impl App {
         if let Some(token) = token {
             builder = builder.personal_token(token);
         } else if !cli.dry_run {
-            return Err(report!(AppError::Initialization)).attach_printable(
+            return Err(Report::new(AppError::Initialization).attach(
                 "GITHUB_TOKEN is required. Please set it or authenticate with 'gh auth login'.",
-            );
+            ));
         }
 
         let octocrab = Arc::new(
             builder
                 .build()
                 .change_context(AppError::Initialization)
-                .attach_printable("Failed to build Octocrab client")?,
+                .attach("Failed to build Octocrab client")?,
         );
 
         Ok(Self {
@@ -143,13 +140,16 @@ impl App {
         }
     }
 
-    async fn fetch_dependabot_prs_for_repo(&self, repo: &str) -> Result<Vec<PrInfo>, AppError> {
+    async fn fetch_dependabot_prs_for_repo(
+        &self,
+        repo: &str,
+    ) -> Result<Vec<PrInfo>, Report<AppError>> {
         self.debug(&format!("Fetching PRs for {}", repo));
 
         let (owner, repo_name) = repo
             .split_once('/')
-            .ok_or_else(|| report!(AppError::InvalidInput))
-            .attach_printable_lazy(|| format!("Invalid repo format: {}", repo))?;
+            .ok_or_else(|| Report::new(AppError::InvalidInput))
+            .attach_with(|| format!("Invalid repo format: {}", repo))?;
 
         let prs_page = self
             .octocrab
@@ -159,7 +159,7 @@ impl App {
             .send()
             .await
             .change_context(AppError::GitHubApi)
-            .attach_printable_lazy(|| format!("Failed to fetch PRs for {}", repo))?;
+            .attach_with(|| format!("Failed to fetch PRs for {}", repo))?;
 
         let prs = prs_page
             .items
@@ -180,7 +180,9 @@ impl App {
         Ok(prs)
     }
 
-    async fn aggregate_repos_with_counts(&self) -> Result<HashMap<String, usize>, AppError> {
+    async fn aggregate_repos_with_counts(
+        &self,
+    ) -> Result<HashMap<String, usize>, Report<AppError>> {
         self.debug("Aggregating repos with PR counts");
 
         let mut repo_counts: HashMap<String, usize> = HashMap::new();
@@ -196,13 +198,14 @@ impl App {
                 .send()
                 .await
                 .change_context(AppError::Search)
-                .attach_printable_lazy(|| format!("Failed to search PRs in {}", org))?;
+                .attach_with(|| format!("Failed to search PRs in {}", org))?;
 
             for issue in page.items {
                 let repo_url = &issue.repository_url;
                 let path = repo_url.path();
                 if let Some(name_with_owner) = path.strip_prefix("/repos/") {
-                    *repo_counts.entry(name_with_owner.to_string()).or_insert(0) += 1;
+                    let count = repo_counts.entry(name_with_owner.to_string()).or_insert(0);
+                    *count += 1;
                 }
             }
         }
@@ -213,7 +216,7 @@ impl App {
     fn select_repository_interactive(
         &self,
         repo_counts: HashMap<String, usize>,
-    ) -> Result<Option<String>, AppError> {
+    ) -> Result<Option<String>, Report<AppError>> {
         let mut items: Vec<String> = repo_counts
             .iter()
             .map(|(repo, count)| format!("{} ({} PRs)", repo, count))
@@ -247,7 +250,7 @@ impl App {
             .items(&items)
             .interact()
             .change_context(AppError::Interactive)
-            .attach_printable("Interactive selection failed")?;
+            .attach("Interactive selection failed")?;
 
         if selection >= items.len() {
             return Ok(None);
@@ -259,7 +262,7 @@ impl App {
         Ok(Some(repo))
     }
 
-    async fn process_repository(&self, repo: &str) -> Result<bool, AppError> {
+    async fn process_repository(&self, repo: &str) -> Result<bool, Report<AppError>> {
         println!(
             "{} Processing {}",
             style("→").cyan(),
@@ -281,8 +284,8 @@ impl App {
 
         let should_comment = if self.cli.confirm {
             if !std::io::stdin().is_terminal() {
-                return Err(report!(AppError::InvalidInput))
-                    .attach_printable("Cannot use --confirm in non-interactive mode");
+                return Err(Report::new(AppError::InvalidInput))
+                    .attach("Cannot use --confirm in non-interactive mode");
             }
             let mut answers = Vec::new();
 
@@ -294,7 +297,7 @@ impl App {
                     ))
                     .default(false)
                     .interact()
-                    .map_err(|_| report!(AppError::Interactive))?;
+                    .map_err(|_| Report::new(AppError::Interactive))?;
                 answers.push(answer);
             }
 
@@ -310,7 +313,7 @@ impl App {
                     .default(false)
                     .interact()
                     .change_context(AppError::Interactive)
-                    .attach_printable("Confirmation failed")?;
+                    .attach("Confirmation failed")?;
                 vec![proceed; all]
             } else {
                 vec![true; all]
@@ -318,6 +321,8 @@ impl App {
         };
 
         let mut commented = false;
+        let mut comment_tasks = Vec::new();
+
         for (pr, should) in prs.iter().zip(should_comment.iter()) {
             if !should {
                 self.debug(&format!("Skipping PR #{}", pr.number));
@@ -327,24 +332,40 @@ impl App {
             if self.cli.dry_run {
                 println!("  [DRY RUN] Would comment on PR #{}: {}", pr.number, pr.url);
             } else {
-                self.debug(&format!("Commenting on PR #{}", pr.number));
-
                 let (owner, repo_name) = repo
                     .split_once('/')
-                    .ok_or_else(|| report!(AppError::InvalidInput))
-                    .attach_printable_lazy(|| format!("Invalid repo format: {}", repo))?;
+                    .ok_or_else(|| Report::new(AppError::InvalidInput))
+                    .attach_with(|| format!("Invalid repo format: {}", repo))?;
 
-                self.octocrab
-                    .issues(owner, repo_name)
-                    .create_comment(pr.number, "@dependabot rebase")
-                    .await
-                    .change_context(AppError::Comment)
-                    .attach_printable_lazy(|| format!("Failed to comment on PR #{}", pr.number))?;
+                let owner = owner.to_string();
+                let repo_name = repo_name.to_string();
+                let pr_number = pr.number;
+                let octocrab = Arc::clone(&self.octocrab);
 
+                comment_tasks.push(async move {
+                    octocrab
+                        .issues(owner, repo_name)
+                        .create_comment(pr_number, "@dependabot rebase")
+                        .await
+                        .change_context(AppError::Comment)
+                        .map_err(|report| {
+                            report.attach(format!("Failed to comment on PR #{}", pr_number))
+                        })?;
+
+                    Ok::<u64, Report<AppError>>(pr_number)
+                });
+            }
+        }
+
+        if !comment_tasks.is_empty() {
+            let mut stream = futures_util::stream::iter(comment_tasks).buffered_unordered(5);
+
+            while let Some(result) = stream.next().await {
+                let pr_number = result?;
                 println!(
                     "  {} Commented on PR #{}{}",
                     style("✓").green(),
-                    pr.number,
+                    pr_number,
                     style(format!(" ({})", repo)).dim()
                 );
                 commented = true;
@@ -354,7 +375,7 @@ impl App {
         Ok(commented)
     }
 
-    async fn run(&self) -> Result<(), AppError> {
+    async fn run(&self) -> Result<(), Report<AppError>> {
         self.debug("Starting dependabot-reviewer");
 
         let selected_repo = if let Some(repo) = &self.cli.repo {
@@ -411,7 +432,7 @@ impl App {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), AppError> {
+async fn main() -> Result<(), Report<AppError>> {
     let cli = Cli::parse();
 
     let app = App::new(cli)?;
