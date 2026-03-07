@@ -1,0 +1,13 @@
+[package]
+name = "dependabot-reviewer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+anyhow = "1.0"
+dialoguer = { version = "0.11", features = ["fuzzy-select"] }
+console = "0.15"
+colored = "2.2"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
