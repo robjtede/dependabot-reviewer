@@ -24,5 +24,5 @@ clippy:
     cargo clippy -- --deny=warnings --deny=clippy::todo
 
 # Run the binary (passes arguments to the app)
-run:
-    cargo run -- $*
+run *args:
+    nix run . -- {{ args }}

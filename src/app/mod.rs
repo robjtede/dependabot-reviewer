@@ -77,7 +77,7 @@ impl App {
     }
 
     pub async fn run(&self) -> Result<(), Report<AppError>> {
-        self.debug("Starting dependabot-reviewer");
+        self.debug("Starting dependabot reviewer");
 
         let selected_repo = if let Some(repo) = &self.cli.repo {
             self.debug(&format!("Using specified repository: {}", repo));
