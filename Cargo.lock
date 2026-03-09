@@ -378,6 +378,7 @@ dependencies = [
 name = "dependabot-reviewer"
 version = "0.1.0"
 dependencies = [
+ "camino",
  "clap",
  "console",
  "derive_more",

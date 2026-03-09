@@ -33,9 +33,11 @@ impl App {
             return Ok(None);
         }
 
-        let (mut review_state, state_path) = ReviewState::load_from_default_path()?;
+        let state_path = ReviewState::default_path()?;
+        self.debug(&format!("Reading state from {}", state_path));
+        let mut review_state = ReviewState::load_from_path(&state_path)?;
         println!("  Found {} Dependabot PR(s):", prs.len());
-        println!("  Review state: {}", style(state_path.display()).dim());
+        println!("  Review state: {}", style(state_path.as_str()).dim());
         for pr in &prs {
             let previously_reviewed = pr
                 .dep_update
@@ -383,7 +385,7 @@ impl App {
                 println!(
                     "  {} Updated review state at {}",
                     style("✓").green(),
-                    style(state_path.display()).dim()
+                    style(state_path.as_str()).dim()
                 );
             }
 

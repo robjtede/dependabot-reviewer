@@ -2,9 +2,9 @@ use std::{
     cmp::Ordering,
     fs,
     io::{ErrorKind, Write as _},
-    path::{Path, PathBuf},
 };
 
+use camino::{Utf8Path, Utf8PathBuf};
 use error_stack::{Report, ResultExt as _};
 use semver::Version;
 use serde::{Deserialize, Serialize};
@@ -28,33 +28,34 @@ struct ReviewEntry {
 }
 
 impl ReviewState {
-    pub(crate) fn load_from_default_path() -> Result<(Self, PathBuf), Report<AppError>> {
+    pub(crate) fn default_path() -> Result<Utf8PathBuf, Report<AppError>> {
         let config_root = dirs::config_dir()
             .ok_or_else(|| Report::new(AppError::Initialization))
             .attach("Unable to resolve user config directory")?;
-        let path = config_root.join(APP_CONFIG_DIR).join(STATE_FILE_NAME);
+        let config_root = Utf8PathBuf::from_path_buf(config_root)
+            .map_err(|_| Report::new(AppError::Initialization))
+            .attach("User config directory is not valid UTF-8")?;
 
-        let state = Self::load_from_path(&path)?;
-        Ok((state, path))
+        Ok(config_root.join(APP_CONFIG_DIR).join(STATE_FILE_NAME))
     }
 
-    fn load_from_path(path: &Path) -> Result<Self, Report<AppError>> {
+    pub(crate) fn load_from_path(path: &Utf8Path) -> Result<Self, Report<AppError>> {
         match fs::read_to_string(path) {
             Ok(content) => toml::from_str::<Self>(&content)
                 .change_context(AppError::Initialization)
-                .attach_with(|| format!("Invalid TOML in {}", path.display())),
+                .attach_with(|| format!("Invalid TOML in {}", path)),
             Err(err) if err.kind() == ErrorKind::NotFound => Ok(Self::default()),
             Err(err) => Err(Report::new(AppError::Initialization))
-                .attach_with(|| format!("Failed to read {}", path.display()))
+                .attach_with(|| format!("Failed to read {}", path))
                 .attach(err.to_string()),
         }
     }
 
-    pub(crate) fn save_to_path(&self, path: &Path) -> Result<(), Report<AppError>> {
+    pub(crate) fn save_to_path(&self, path: &Utf8Path) -> Result<(), Report<AppError>> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
                 .change_context(AppError::Initialization)
-                .attach_with(|| format!("Failed to create {}", parent.display()))?;
+                .attach_with(|| format!("Failed to create {}", parent))?;
         }
 
         let payload = toml::to_string_pretty(self)
@@ -64,21 +65,15 @@ impl ReviewState {
         let temp_path = path.with_extension("toml.tmp");
         let mut temp_file = fs::File::create(&temp_path)
             .change_context(AppError::Initialization)
-            .attach_with(|| format!("Failed to create {}", temp_path.display()))?;
+            .attach_with(|| format!("Failed to create {}", temp_path))?;
         temp_file
             .write_all(payload.as_bytes())
             .change_context(AppError::Initialization)
-            .attach_with(|| format!("Failed to write {}", temp_path.display()))?;
+            .attach_with(|| format!("Failed to write {}", temp_path))?;
 
         fs::rename(&temp_path, path)
             .change_context(AppError::Initialization)
-            .attach_with(|| {
-                format!(
-                    "Failed to replace {} with {}",
-                    path.display(),
-                    temp_path.display()
-                )
-            })?;
+            .attach_with(|| format!("Failed to replace {} with {}", path, temp_path))?;
 
         Ok(())
     }
