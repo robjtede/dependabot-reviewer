@@ -31,6 +31,7 @@ pub struct Cli {
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum Action {
+    OpenInBrowser,
     ApproveMerge,
     Rebase,
     Recreate,

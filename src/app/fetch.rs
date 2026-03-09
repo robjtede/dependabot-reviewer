@@ -8,7 +8,7 @@ use octocrab::{models::StatusState, params::repos::Reference};
 use super::App;
 use crate::{
     error::AppError,
-    github::{CiStatus, PrInfo},
+    github::{CiStatus, PrInfo, parse_dep_update},
 };
 
 impl App {
@@ -96,9 +96,8 @@ impl App {
             .collect();
 
         let ci_futures = dependabot_prs.into_iter().map(|pr| async move {
-            let ci_status = self
-                .fetch_ci_status(owner, repo_name, &pr.head.ref_field)
-                .await;
+            let head_ref = pr.head.ref_field.clone();
+            let ci_status = self.fetch_ci_status(owner, repo_name, &head_ref).await;
             let head_sha = pr.head.sha;
 
             self.debug(&format!(
@@ -108,12 +107,16 @@ impl App {
                 ci_status,
             ));
 
+            let title = pr.title.unwrap_or_default();
+            let dep_update = parse_dep_update(&title, &head_ref);
+
             PrInfo {
                 number: pr.number,
-                title: pr.title.unwrap_or_default(),
+                title,
                 url: pr.html_url.map(|u| u.to_string()).unwrap_or_default(),
                 head_sha,
                 ci_status,
+                dep_update,
             }
         });
 
