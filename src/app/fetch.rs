@@ -114,6 +114,7 @@ impl App {
                 number: pr.number,
                 title,
                 url: pr.html_url.map(|u| u.to_string()).unwrap_or_default(),
+                base_ref_name: pr.base.ref_field,
                 head_sha,
                 ci_status,
                 dep_update,

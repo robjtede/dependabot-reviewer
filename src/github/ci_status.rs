@@ -28,8 +28,4 @@ impl CiStatus {
             CiStatus::Unknown => style("○").dim(),
         }
     }
-
-    pub fn is_mergeable(self) -> bool {
-        matches!(self, CiStatus::Passing | CiStatus::Unknown)
-    }
 }
