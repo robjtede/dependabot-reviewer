@@ -33,4 +33,4 @@ build:
 
 # Run tests.
 test:
-    cargo --locked test
+    cargo --locked nextest run
