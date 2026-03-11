@@ -8,7 +8,7 @@ use octocrab::{models::StatusState, params::repos::Reference};
 use super::App;
 use crate::{
     error::AppError,
-    github::{CiStatus, PrInfo, parse_dep_update},
+    github::{parse_dep_update, CiStatus, PrInfo},
 };
 
 impl App {

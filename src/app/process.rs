@@ -1,14 +1,14 @@
 use std::{io::IsTerminal as _, process::Command, time::Duration};
 
 use console::style;
-use dialoguer::{Confirm, Select, theme::ColorfulTheme};
+use dialoguer::{theme::ColorfulTheme, Confirm, Select};
 use error_stack::{Report, ResultExt as _};
 use futures_buffered::BufferedStreamExt;
 use futures_util::{FutureExt as _, StreamExt as _};
 use octocrab::{models::pulls::ReviewAction, params::pulls::MergeMethod};
 use serde::{Deserialize, Serialize};
 
-use super::{App, state::ReviewState};
+use super::{state::ReviewState, App};
 use crate::{
     cli::Action,
     error::AppError,
@@ -309,10 +309,7 @@ impl App {
                             };
                             match merge_mode {
                                 ApproveMergeMode::Direct => {
-                                    self.debug(&format!(
-                                        "PR #{} merge queue: not used",
-                                        pr.number
-                                    ));
+                                    self.debug(&format!("PR #{} merge queue: not used", pr.number));
                                     println!(
                                         "  [DRY RUN] Would approve and merge PR #{}{} with {:?}: {}",
                                         pr.number, marker, merge_method, pr.url
@@ -359,10 +356,7 @@ impl App {
                                     );
                                 }
                                 ApproveMergeMode::SkipPendingWithoutQueue => {
-                                    self.debug(&format!(
-                                        "PR #{} merge queue: not used",
-                                        pr.number
-                                    ));
+                                    self.debug(&format!("PR #{} merge queue: not used", pr.number));
                                     println!(
                                         "  [DRY RUN] Would skip PR #{} (CI {}, no merge queue): {}",
                                         pr.number, pr.ci_status, pr.url
@@ -545,10 +539,7 @@ impl App {
 
                     match merge_mode {
                         ApproveMergeMode::Direct => {
-                            self.debug(&format!(
-                                "PR #{} merge queue: not used",
-                                info.pr_number
-                            ));
+                            self.debug(&format!("PR #{} merge queue: not used", info.pr_number));
                             self.direct_merge_pull_request(
                                 &info.owner,
                                 &info.repo_name,
@@ -623,10 +614,7 @@ impl App {
                             );
                         }
                         ApproveMergeMode::SkipPendingWithoutQueue => {
-                            self.debug(&format!(
-                                "PR #{} merge queue: not used",
-                                info.pr_number
-                            ));
+                            self.debug(&format!("PR #{} merge queue: not used", info.pr_number));
                             println!(
                                 "  {} Skipping PR #{} (CI {}, no merge queue){}",
                                 style("⊘").yellow(),
@@ -715,11 +703,17 @@ impl App {
         let repository = data
             .repository
             .ok_or_else(|| Report::new(AppError::Comment))
-            .attach(format!("Repository missing in GraphQL response for PR #{}", pr_number))?;
+            .attach(format!(
+                "Repository missing in GraphQL response for PR #{}",
+                pr_number
+            ))?;
         let pull_request = repository
             .pull_request
             .ok_or_else(|| Report::new(AppError::Comment))
-            .attach(format!("Pull request missing in GraphQL response for PR #{}", pr_number))?;
+            .attach(format!(
+                "Pull request missing in GraphQL response for PR #{}",
+                pr_number
+            ))?;
 
         let _ = repository.merge_queue.as_ref().map(|node| node.id.as_str());
         let _ = pull_request

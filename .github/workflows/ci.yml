@@ -10,7 +10,6 @@ on:
 
 permissions:
   contents: read
-  id-token: write
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -22,19 +21,13 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install Determinate Nix
-        uses: DeterminateSystems/determinate-nix-action@v3
+      - name: Set up Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          extra-conf: lazy-trees = true
-
-      - name: Set up FlakeHub Cache
-        uses: DeterminateSystems/flakehub-cache-action@v3
-
-      - name: Enter Nix devshell
-        uses: nicknovitski/nix-develop@v1.2.1
+          components: clippy
 
       - name: Check
-        run: just check
+        run: just clippy
 
-      - name: Build
-        run: just build
+      - name: Test
+        run: just test
