@@ -26,10 +26,10 @@ jobs:
         with:
           components: clippy
 
-      - name: Install nextest
+      - name: Install just,nextest
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-nextest
+          tool: just,cargo-nextest
 
       - name: Check
         run: just clippy
