@@ -14,6 +14,7 @@ use crate::{
     cli::{Action, Cli},
     error::AppError,
 };
+use state::ReviewState;
 
 pub struct App {
     pub(crate) cli: Cli,
@@ -21,7 +22,19 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(cli: Cli) -> Result<Self, Report<AppError>> {
+    pub fn new(mut cli: Cli) -> Result<Self, Report<AppError>> {
+        if cli.org.is_empty() {
+            let state_path = ReviewState::default_path()?;
+            let state = ReviewState::load_from_path(&state_path)?;
+            cli.org = state
+                .default_orgs()
+                .ok_or_else(|| Report::new(AppError::InvalidInput))
+                .attach(format!(
+                    "No organizations provided. Use --org or configure [settings].default_orgs in {}.",
+                    state_path
+                ))?;
+        }
+
         let mut token = std::env::var("GITHUB_TOKEN").ok();
 
         if token.is_none() && !cli.dry_run {
@@ -69,6 +82,21 @@ impl App {
             .attach("Failed to build Octocrab client")?;
 
         Ok(Self { cli, octocrab })
+    }
+
+    pub fn update_default_orgs(orgs: Vec<String>) -> Result<(), Report<AppError>> {
+        let state_path = ReviewState::default_path()?;
+        let mut state = ReviewState::load_from_path(&state_path)?;
+        state.set_default_orgs(orgs.clone());
+        state.save_to_path(&state_path)?;
+
+        println!(
+            "Saved default orgs to {}: {}",
+            style(state_path).dim(),
+            orgs.join(", ")
+        );
+
+        Ok(())
     }
 
     pub(crate) fn debug(&self, msg: &str) {

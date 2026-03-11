@@ -5,8 +5,12 @@ use clap::{Parser, ValueEnum};
 #[command(about = "Mass rebase or recreate Dependabot PRs across repositories", long_about = None)]
 pub struct Cli {
     /// GitHub organizations to search (can be used multiple times).
-    #[arg(short, long, default_values = ["actix", "robjtede", "x52dev"])]
+    #[arg(short, long)]
     pub org: Vec<String>,
+
+    /// Persist the provided --org values as the default GitHub organizations.
+    #[arg(long)]
+    pub save_default_orgs: bool,
 
     /// Specific repository to process (owner/repo).
     #[arg(short, long)]

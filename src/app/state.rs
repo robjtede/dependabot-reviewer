@@ -17,7 +17,16 @@ const APP_CONFIG_DIR: &str = "dependabot-reviewer";
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct ReviewState {
     #[serde(default)]
+    settings: ReviewSettings,
+
+    #[serde(default)]
     entries: Vec<ReviewEntry>,
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+struct ReviewSettings {
+    #[serde(default)]
+    default_orgs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -78,6 +87,18 @@ impl ReviewState {
         Ok(())
     }
 
+    pub(crate) fn default_orgs(&self) -> Option<Vec<String>> {
+        if self.settings.default_orgs.is_empty() {
+            None
+        } else {
+            Some(self.settings.default_orgs.clone())
+        }
+    }
+
+    pub(crate) fn set_default_orgs(&mut self, orgs: Vec<String>) {
+        self.settings.default_orgs = orgs;
+    }
+
     pub(crate) fn highest_approved_for(&self, dep_type: &str, dep_name: &str) -> Option<&str> {
         self.entries
             .iter()
@@ -135,4 +156,27 @@ fn parse_version(raw: &str) -> Option<Version> {
 
 fn normalize_version(version: &str) -> String {
     version.trim().trim_start_matches('v').to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ReviewState;
+
+    #[test]
+    fn returns_none_when_default_orgs_are_not_configured() {
+        let state = ReviewState::default();
+
+        assert_eq!(state.default_orgs(), None);
+    }
+
+    #[test]
+    fn uses_configured_default_orgs_when_present() {
+        let mut state = ReviewState::default();
+        state.set_default_orgs(vec!["bytesize-rs".to_string(), "deps-rs".to_string()]);
+
+        assert_eq!(
+            state.default_orgs(),
+            Some(vec!["bytesize-rs".to_string(), "deps-rs".to_string()])
+        );
+    }
 }
