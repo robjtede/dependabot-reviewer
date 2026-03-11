@@ -10,11 +10,11 @@ use dialoguer::{theme::ColorfulTheme, Confirm};
 use error_stack::{Report, ResultExt as _};
 use octocrab::Octocrab;
 
+use self::state::ReviewState;
 use crate::{
     cli::{Action, Cli},
     error::AppError,
 };
-use state::ReviewState;
 
 pub struct App {
     pub(crate) cli: Cli,

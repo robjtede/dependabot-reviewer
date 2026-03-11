@@ -14,9 +14,8 @@ async fn main() -> Result<(), Report<AppError>> {
 
     if cli.save_default_orgs {
         if cli.org.is_empty() {
-            return Err(Report::new(AppError::InvalidInput).attach(
-                "--save-default-orgs requires at least one --org value to persist.",
-            ));
+            return Err(Report::new(AppError::InvalidInput)
+                .attach("--save-default-orgs requires at least one --org value to persist."));
         }
 
         App::update_default_orgs(cli.org.clone())?;
