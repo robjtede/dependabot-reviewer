@@ -214,7 +214,7 @@ impl App {
             } else {
                 let items = vec![
                     "Approve + Merge",
-                    "Open In Browser",
+                    "Open Unreviewed In Browser",
                     "Rebase",
                     "Recreate",
                     "Refresh PR State",
@@ -228,7 +228,7 @@ impl App {
                     .attach("Action selection failed")?;
                 match selection {
                     0 => PromptChoice::Action(Action::ApproveMerge),
-                    1 => PromptChoice::Action(Action::OpenInBrowser),
+                    1 => PromptChoice::Action(Action::OpenUnreviewedInBrowser),
                     2 => PromptChoice::Action(Action::Rebase),
                     3 => PromptChoice::Action(Action::Recreate),
                     4 => PromptChoice::Refresh,
@@ -273,7 +273,10 @@ impl App {
 
                 if self.cli.dry_run {
                     match action {
-                        Action::OpenInBrowser => {
+                        Action::OpenUnreviewedInBrowser => {
+                            if previously_reviewed {
+                                continue;
+                            }
                             println!("  [DRY RUN] Would open PR #{}: {}", pr.number, pr.url);
                         }
                         Action::ApproveMerge => {
@@ -373,7 +376,10 @@ impl App {
                     let octocrab = self.octocrab.clone();
 
                     match action {
-                        Action::OpenInBrowser => {
+                        Action::OpenUnreviewedInBrowser => {
+                            if previously_reviewed {
+                                continue;
+                            }
                             println!(
                                 "  {} Running `open {}`",
                                 style("•").dim(),
@@ -644,7 +650,14 @@ impl App {
                 );
             }
 
-            if self.cli.action.is_some() || !matches!(action, Action::OpenInBrowser) {
+            if matches!(action, Action::OpenUnreviewedInBrowser)
+                && !self.cli.dry_run
+                && !opened_in_browser_in_session
+            {
+                println!("  No unreviewed PRs to open.");
+            }
+
+            if self.cli.action.is_some() || !matches!(action, Action::OpenUnreviewedInBrowser) {
                 return Ok(performed_action);
             }
 

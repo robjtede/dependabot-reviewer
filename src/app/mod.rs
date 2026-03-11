@@ -154,8 +154,8 @@ impl App {
             println!("Run without --dry-run to actually comment on PRs.");
         } else if let Some(action) = performed_action {
             match action {
-                Action::OpenInBrowser => {
-                    println!("Opened all selected PRs in your browser.");
+                Action::OpenUnreviewedInBrowser => {
+                    println!("Opened unreviewed PRs in your browser.");
                 }
                 Action::ApproveMerge => {
                     println!("All selected PRs have been approved and merged.");
