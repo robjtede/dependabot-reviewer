@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use dialoguer::{theme::ColorfulTheme, FuzzySelect};
+use dialoguer::{theme::ColorfulTheme, MultiSelect};
 use error_stack::{Report, ResultExt as _};
 
 use super::App;
@@ -10,7 +10,7 @@ impl App {
     pub(crate) fn select_repository_interactive(
         &self,
         repo_counts: HashMap<String, usize>,
-    ) -> Result<Option<String>, Report<AppError>> {
+    ) -> Result<Vec<String>, Report<AppError>> {
         let mut items: Vec<String> = repo_counts
             .iter()
             .map(|(repo, count)| format!("{} ({} PRs)", repo, count))
@@ -19,26 +19,24 @@ impl App {
         items.sort();
 
         if items.is_empty() {
-            return Ok(None);
+            return Ok(Vec::new());
         }
 
         println!("Repositories with open Dependabot PRs:");
         println!();
 
-        let selection = FuzzySelect::with_theme(&ColorfulTheme::default())
-            .with_prompt("Choose a repository")
+        let selections = MultiSelect::with_theme(&ColorfulTheme::default())
+            .with_prompt("Choose repositories")
             .items(&items)
             .interact()
             .change_context(AppError::Interactive)
             .attach("Interactive selection failed")?;
 
-        if selection >= items.len() {
-            return Ok(None);
-        }
-
-        let selected = &items[selection];
-        let repo = selected.split(" (").next().unwrap_or("").to_string();
-
-        Ok(Some(repo))
+        Ok(selections
+            .into_iter()
+            .filter_map(|selection| items.get(selection))
+            .filter_map(|selected| selected.split(" (").next())
+            .map(ToOwned::to_owned)
+            .collect())
     }
 }

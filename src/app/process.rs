@@ -12,10 +12,18 @@ use super::{state::ReviewState, App};
 use crate::{
     cli::Action,
     error::AppError,
-    github::{CiStatus, DepUpdate},
+    github::{CiStatus, DepUpdate, PrInfo},
 };
 
+struct ReviewItem {
+    repo: String,
+    owner: String,
+    repo_name: String,
+    pr: PrInfo,
+}
+
 struct MergeInfo {
+    repo: String,
     owner: String,
     repo_name: String,
     pr_number: u64,
@@ -150,17 +158,10 @@ struct EnablePullRequestAutoMergePayload {
 }
 
 impl App {
-    pub(crate) async fn process_repository(
+    pub(crate) async fn process_repositories(
         &self,
-        repo: &str,
+        repos: &[String],
     ) -> Result<Option<Action>, Report<AppError>> {
-        let (owner, repo_name) = repo
-            .split_once('/')
-            .ok_or_else(|| Report::new(AppError::InvalidInput))
-            .attach_with(|| format!("Invalid repo format: {}", repo))?;
-        let owner = owner.to_string();
-        let repo_name = repo_name.to_string();
-
         let state_path = ReviewState::default_path()?;
         self.debug(&format!("Reading state from {}", state_path));
         let mut review_state = ReviewState::load_from_path(&state_path)?;
@@ -168,19 +169,49 @@ impl App {
         let mut performed_action = None;
         let mut opened_in_browser_in_session = false;
         loop {
-            println!("Fetching PR details for {}", repo);
+            println!("Fetching PR details for {} repositories", repos.len());
 
-            let prs = self.fetch_dependabot_prs_for_repo(repo).await?;
+            let mut review_items = Vec::new();
+            for repo in repos {
+                let (owner, repo_name) = repo
+                    .split_once('/')
+                    .ok_or_else(|| Report::new(AppError::InvalidInput))
+                    .attach_with(|| format!("Invalid repo format: {}", repo))?;
 
-            if prs.is_empty() {
-                println!("  No open Dependabot PRs found in {}", repo);
+                let prs = self.fetch_dependabot_prs_for_repo(repo).await?;
+                review_items.extend(prs.into_iter().map(|pr| ReviewItem {
+                    repo: repo.clone(),
+                    owner: owner.to_string(),
+                    repo_name: repo_name.to_string(),
+                    pr,
+                }));
+            }
+
+            review_items.sort_by(|a, b| {
+                a.repo
+                    .cmp(&b.repo)
+                    .then_with(|| b.pr.number.cmp(&a.pr.number))
+            });
+
+            if review_items.is_empty() {
+                println!("  No open Dependabot PRs found in the selected repositories.");
                 return Ok(performed_action);
             }
 
-            println!("  Found {} Dependabot PR(s):", prs.len());
+            println!("  Found {} Dependabot PR(s):", review_items.len());
             println!("  Review state: {}", style(state_path.as_str()).dim());
-            for pr in &prs {
-                let previously_reviewed = pr
+            let mut current_repo: Option<&str> = None;
+            for item in &review_items {
+                if current_repo != Some(item.repo.as_str()) {
+                    if current_repo.is_some() {
+                        println!();
+                    }
+                    println!("  {}", style(&item.repo).bold());
+                    current_repo = Some(item.repo.as_str());
+                }
+
+                let previously_reviewed = item
+                    .pr
                     .dep_update
                     .as_ref()
                     .map(|dep_update| review_state.is_previously_reviewed(dep_update))
@@ -193,13 +224,13 @@ impl App {
 
                 println!(
                     "    {} #{}: {} [{}]\n        {}",
-                    pr.ci_status.icon(),
-                    pr.number,
-                    pr.title,
+                    item.pr.ci_status.icon(),
+                    item.pr.number,
+                    item.pr.title,
                     review_badge,
-                    style(&pr.url).dim()
+                    style(&item.pr.url).dim()
                 );
-                if pr.dep_update.is_none() {
+                if item.pr.dep_update.is_none() {
                     println!(
                         "      {}",
                         style("No dependency/version metadata parsed from PR title").dim()
@@ -245,17 +276,28 @@ impl App {
             };
 
             let approve_merge_context = if matches!(action, Action::ApproveMerge) {
-                let repo_info = self
-                    .octocrab
-                    .repos(&owner, &repo_name)
-                    .get()
-                    .await
-                    .change_context(AppError::Comment)
-                    .attach_with(|| format!("Failed to get repo info for {}", repo))?;
-                Some((
-                    preferred_merge_method(&repo_info)?,
-                    repo_info.allow_auto_merge == Some(true),
-                ))
+                let mut contexts = std::collections::HashMap::new();
+                for repo in repos {
+                    let (owner, repo_name) = repo
+                        .split_once('/')
+                        .ok_or_else(|| Report::new(AppError::InvalidInput))
+                        .attach_with(|| format!("Invalid repo format: {}", repo))?;
+                    let repo_info = self
+                        .octocrab
+                        .repos(owner, repo_name)
+                        .get()
+                        .await
+                        .change_context(AppError::Comment)
+                        .attach_with(|| format!("Failed to get repo info for {}", repo))?;
+                    contexts.insert(
+                        repo.clone(),
+                        (
+                            preferred_merge_method(&repo_info)?,
+                            repo_info.allow_auto_merge == Some(true),
+                        ),
+                    );
+                }
+                Some(contexts)
             } else {
                 None
             };
@@ -264,8 +306,9 @@ impl App {
             let mut merge_infos: Vec<MergeInfo> = Vec::new();
             let mut state_changed = false;
 
-            for pr in &prs {
-                let previously_reviewed = pr
+            for item in &review_items {
+                let previously_reviewed = item
+                    .pr
                     .dep_update
                     .as_ref()
                     .map(|dep_update| review_state.is_previously_reviewed(dep_update))
@@ -277,30 +320,41 @@ impl App {
                             if previously_reviewed {
                                 continue;
                             }
-                            println!("  [DRY RUN] Would open PR #{}: {}", pr.number, pr.url);
+                            println!(
+                                "  [DRY RUN] Would open PR #{}{}: {}",
+                                item.pr.number,
+                                style(format!(" ({})", item.repo)).dim(),
+                                item.pr.url
+                            );
                         }
                         Action::ApproveMerge => {
-                            if pr.ci_status == CiStatus::Failing {
+                            if item.pr.ci_status == CiStatus::Failing {
                                 println!(
-                                    "  [DRY RUN] Would skip PR #{} (CI {}): {}",
-                                    pr.number, pr.ci_status, pr.url
+                                    "  [DRY RUN] Would skip PR #{} (CI {}){}: {}",
+                                    item.pr.number,
+                                    item.pr.ci_status,
+                                    style(format!(" ({})", item.repo)).dim(),
+                                    item.pr.url
                                 );
                                 continue;
                             }
 
-                            let (merge_method, allow_auto_merge) =
-                                approve_merge_context.expect("approve merge context");
+                            let (merge_method, allow_auto_merge) = approve_merge_context
+                                .as_ref()
+                                .and_then(|contexts| contexts.get(&item.repo))
+                                .copied()
+                                .expect("approve merge context");
                             let queue_status = self
                                 .fetch_merge_queue_status(
-                                    &owner,
-                                    &repo_name,
-                                    pr.number,
-                                    &pr.base_ref_name,
+                                    &item.owner,
+                                    &item.repo_name,
+                                    item.pr.number,
+                                    &item.pr.base_ref_name,
                                 )
                                 .await?;
                             let merge_mode = self.choose_approve_merge_mode(
-                                pr.number,
-                                pr.ci_status,
+                                item.pr.number,
+                                item.pr.ci_status,
                                 &queue_status,
                                 allow_auto_merge,
                             );
@@ -312,67 +366,97 @@ impl App {
                             };
                             match merge_mode {
                                 ApproveMergeMode::Direct => {
-                                    self.debug(&format!("PR #{} merge queue: not used", pr.number));
+                                    self.debug(&format!(
+                                        "PR #{} merge queue: not used",
+                                        item.pr.number
+                                    ));
                                     println!(
-                                        "  [DRY RUN] Would approve and merge PR #{}{} with {:?}: {}",
-                                        pr.number, marker, merge_method, pr.url
+                                        "  [DRY RUN] Would approve and merge PR #{}{} with {:?}{}: {}",
+                                        item.pr.number,
+                                        marker,
+                                        merge_method,
+                                        style(format!(" ({})", item.repo)).dim(),
+                                        item.pr.url
                                     );
                                 }
                                 ApproveMergeMode::MergeQueueEnqueue => {
                                     self.debug(&format!(
                                         "PR #{} merge queue: used (enqueue)",
-                                        pr.number
+                                        item.pr.number
                                     ));
                                     println!(
-                                        "  [DRY RUN] Would approve and add PR #{}{} to the merge queue: {}",
-                                        pr.number, marker, pr.url
+                                        "  [DRY RUN] Would approve and add PR #{}{} to the merge queue{}: {}",
+                                        item.pr.number,
+                                        marker,
+                                        style(format!(" ({})", item.repo)).dim(),
+                                        item.pr.url
                                     );
                                 }
                                 ApproveMergeMode::MergeQueueAutoMerge => {
                                     self.debug(&format!(
                                         "PR #{} merge queue: used (auto-merge until queueable)",
-                                        pr.number
+                                        item.pr.number
                                     ));
                                     println!(
-                                        "  [DRY RUN] Would approve PR #{}{} and enable auto-merge for the merge queue: {}",
-                                        pr.number, marker, pr.url
+                                        "  [DRY RUN] Would approve PR #{}{} and enable auto-merge for the merge queue{}: {}",
+                                        item.pr.number,
+                                        marker,
+                                        style(format!(" ({})", item.repo)).dim(),
+                                        item.pr.url
                                     );
                                 }
                                 ApproveMergeMode::AlreadyQueued => {
                                     self.debug(&format!(
                                         "PR #{} merge queue: already queued",
-                                        pr.number
+                                        item.pr.number
                                     ));
                                     println!(
-                                        "  [DRY RUN] Would approve PR #{}{} (already in merge queue): {}",
-                                        pr.number, marker, pr.url
+                                        "  [DRY RUN] Would approve PR #{}{} (already in merge queue){}: {}",
+                                        item.pr.number,
+                                        marker,
+                                        style(format!(" ({})", item.repo)).dim(),
+                                        item.pr.url
                                     );
                                 }
                                 ApproveMergeMode::AlreadyAutoMergeEnabled => {
                                     self.debug(&format!(
                                         "PR #{} merge queue: already using auto-merge",
-                                        pr.number
+                                        item.pr.number
                                     ));
                                     println!(
-                                        "  [DRY RUN] Would approve PR #{}{} (auto-merge already enabled for merge queue): {}",
-                                        pr.number, marker, pr.url
+                                        "  [DRY RUN] Would approve PR #{}{} (auto-merge already enabled for merge queue){}: {}",
+                                        item.pr.number,
+                                        marker,
+                                        style(format!(" ({})", item.repo)).dim(),
+                                        item.pr.url
                                     );
                                 }
                                 ApproveMergeMode::SkipPendingWithoutQueue => {
-                                    self.debug(&format!("PR #{} merge queue: not used", pr.number));
+                                    self.debug(&format!(
+                                        "PR #{} merge queue: not used",
+                                        item.pr.number
+                                    ));
                                     println!(
-                                        "  [DRY RUN] Would skip PR #{} (CI {}, no merge queue): {}",
-                                        pr.number, pr.ci_status, pr.url
+                                        "  [DRY RUN] Would skip PR #{} (CI {}, no merge queue){}: {}",
+                                        item.pr.number,
+                                        item.pr.ci_status,
+                                        style(format!(" ({})", item.repo)).dim(),
+                                        item.pr.url
                                     );
                                 }
                             }
                         }
                         _ => {
-                            println!("  [DRY RUN] Would comment on PR #{}: {}", pr.number, pr.url);
+                            println!(
+                                "  [DRY RUN] Would comment on PR #{}{}: {}",
+                                item.pr.number,
+                                style(format!(" ({})", item.repo)).dim(),
+                                item.pr.url
+                            );
                         }
                     }
                 } else {
-                    let pr_number = pr.number;
+                    let pr_number = item.pr.number;
                     let octocrab = self.octocrab.clone();
 
                     match action {
@@ -383,21 +467,22 @@ impl App {
                             println!(
                                 "  {} Running `open {}`",
                                 style("•").dim(),
-                                style(&pr.url).dim()
+                                style(&item.pr.url).dim()
                             );
-                            open_in_browser(&pr.url)?;
+                            open_in_browser(&item.pr.url)?;
                             println!(
                                 "  {} Opened PR #{}{}",
                                 style("✓").green(),
                                 pr_number,
-                                style(format!(" ({})", repo)).dim()
+                                style(format!(" ({})", item.repo)).dim()
                             );
                             performed_action = Some(action);
                             opened_in_browser_in_session = true;
                         }
                         Action::Rebase => {
-                            let owner = owner.clone();
-                            let repo_name = repo_name.clone();
+                            let owner = item.owner.clone();
+                            let repo_name = item.repo_name.clone();
+                            let repo = item.repo.clone();
                             comment_tasks.push(
                                 async move {
                                     self.debug(&format!("Commenting on PR #{}", pr_number));
@@ -412,14 +497,15 @@ impl App {
                                             pr_number
                                         ))?;
 
-                                    Ok::<_, Report<_>>(pr_number)
+                                    Ok::<_, Report<_>>((pr_number, repo))
                                 }
                                 .boxed(),
                             );
                         }
                         Action::Recreate => {
-                            let owner = owner.clone();
-                            let repo_name = repo_name.clone();
+                            let owner = item.owner.clone();
+                            let repo_name = item.repo_name.clone();
+                            let repo = item.repo.clone();
                             comment_tasks.push(
                                 async move {
                                     self.debug(&format!("Commenting on PR #{}", pr_number));
@@ -434,21 +520,22 @@ impl App {
                                             pr_number
                                         ))?;
 
-                                    Ok::<_, Report<_>>(pr_number)
+                                    Ok::<_, Report<_>>((pr_number, repo))
                                 }
                                 .boxed(),
                             );
                         }
                         Action::ApproveMerge => {
-                            if pr.ci_status != CiStatus::Failing {
+                            if item.pr.ci_status != CiStatus::Failing {
                                 merge_infos.push(MergeInfo {
-                                    owner: owner.clone(),
-                                    repo_name: repo_name.clone(),
+                                    repo: item.repo.clone(),
+                                    owner: item.owner.clone(),
+                                    repo_name: item.repo_name.clone(),
                                     pr_number,
-                                    url: pr.url.clone(),
-                                    base_ref_name: pr.base_ref_name.clone(),
-                                    ci_status: pr.ci_status,
-                                    dep_update: pr.dep_update.clone(),
+                                    url: item.pr.url.clone(),
+                                    base_ref_name: item.pr.base_ref_name.clone(),
+                                    ci_status: item.pr.ci_status,
+                                    dep_update: item.pr.dep_update.clone(),
                                     previously_reviewed,
                                 });
                             } else {
@@ -456,8 +543,8 @@ impl App {
                                     "  {} Skipping PR #{} (CI {}){}",
                                     style("⊘").yellow(),
                                     pr_number,
-                                    pr.ci_status,
-                                    style(format!(" ({})", repo)).dim()
+                                    item.pr.ci_status,
+                                    style(format!(" ({})", item.repo)).dim()
                                 );
                             }
                         }
@@ -469,7 +556,7 @@ impl App {
                 let mut stream = futures_util::stream::iter(comment_tasks).buffered_unordered(5);
 
                 while let Some(result) = stream.next().await {
-                    let pr_number = result?;
+                    let (pr_number, repo) = result?;
                     println!(
                         "  {} Commented on PR #{}{}",
                         style("✓").green(),
@@ -516,9 +603,12 @@ impl App {
                 // Merges must run sequentially: each merge modifies the base branch,
                 // which invalidates the head SHA of subsequent PRs. Running them in
                 // parallel causes "Base branch was modified" errors.
-                let (merge_method, allow_auto_merge) =
-                    approve_merge_context.expect("approve merge context");
                 for info in &merge_infos {
+                    let (merge_method, allow_auto_merge) = approve_merge_context
+                        .as_ref()
+                        .and_then(|contexts| contexts.get(&info.repo))
+                        .copied()
+                        .expect("approve merge context");
                     let queue_status = self
                         .fetch_merge_queue_status(
                             &info.owner,
@@ -557,7 +647,7 @@ impl App {
                                 "  {} Approved and merged PR #{}{}",
                                 style("✓").green(),
                                 info.pr_number,
-                                style(format!(" ({})", repo)).dim()
+                                style(format!(" ({})", info.repo)).dim()
                             );
                         }
                         ApproveMergeMode::MergeQueueEnqueue => {
@@ -574,7 +664,7 @@ impl App {
                                 "  {} Approved PR #{} and added it to the merge queue{}",
                                 style("✓").green(),
                                 info.pr_number,
-                                style(format!(" ({})", repo)).dim()
+                                style(format!(" ({})", info.repo)).dim()
                             );
                         }
                         ApproveMergeMode::MergeQueueAutoMerge => {
@@ -592,7 +682,7 @@ impl App {
                                 "  {} Approved PR #{} and enabled auto-merge for the merge queue{}",
                                 style("✓").green(),
                                 info.pr_number,
-                                style(format!(" ({})", repo)).dim()
+                                style(format!(" ({})", info.repo)).dim()
                             );
                         }
                         ApproveMergeMode::AlreadyQueued => {
@@ -604,7 +694,7 @@ impl App {
                                 "  {} Approved PR #{} (already in merge queue){}",
                                 style("✓").green(),
                                 info.pr_number,
-                                style(format!(" ({})", repo)).dim()
+                                style(format!(" ({})", info.repo)).dim()
                             );
                         }
                         ApproveMergeMode::AlreadyAutoMergeEnabled => {
@@ -616,7 +706,7 @@ impl App {
                                 "  {} Approved PR #{} (auto-merge already enabled){}",
                                 style("✓").green(),
                                 info.pr_number,
-                                style(format!(" ({})", repo)).dim()
+                                style(format!(" ({})", info.repo)).dim()
                             );
                         }
                         ApproveMergeMode::SkipPendingWithoutQueue => {
@@ -626,7 +716,7 @@ impl App {
                                 style("⊘").yellow(),
                                 info.pr_number,
                                 info.ci_status,
-                                style(format!(" ({})", repo)).dim()
+                                style(format!(" ({})", info.repo)).dim()
                             );
                             continue;
                         }

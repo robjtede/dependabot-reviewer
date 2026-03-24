@@ -108,9 +108,9 @@ impl App {
     pub async fn run(&self) -> Result<(), Report<AppError>> {
         self.debug("Starting dependabot reviewer");
 
-        let selected_repo = if let Some(repo) = &self.cli.repo {
+        let selected_repos = if let Some(repo) = &self.cli.repo {
             self.debug(&format!("Using specified repository: {}", repo));
-            Some(repo.clone())
+            vec![repo.clone()]
         } else {
             let repo_counts = self.aggregate_repos_with_counts().await?;
 
@@ -120,13 +120,12 @@ impl App {
             }
 
             if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
-                match self.select_repository_interactive(repo_counts)? {
-                    Some(repo) => Some(repo),
-                    None => {
-                        println!("No repository selected. Exiting.");
-                        return Ok(());
-                    }
+                let repos = self.select_repository_interactive(repo_counts)?;
+                if repos.is_empty() {
+                    println!("No repositories selected. Exiting.");
+                    return Ok(());
                 }
+                repos
             } else {
                 println!("Repositories with open Dependabot PRs:");
                 let mut repos: Vec<_> = repo_counts.into_iter().collect();
@@ -142,10 +141,7 @@ impl App {
             }
         };
 
-        let mut performed_action = None;
-        if let Some(repo) = selected_repo {
-            performed_action = self.process_repository(&repo).await?;
-        }
+        let performed_action = self.process_repositories(&selected_repos).await?;
 
         println!();
         println!("{}", style("Done!").green().bold());
