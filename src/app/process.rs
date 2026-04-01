@@ -45,6 +45,7 @@ struct MergeQueueStatus {
 #[derive(Debug)]
 enum ApproveMergeMode {
     Direct,
+    AutoMerge,
     MergeQueueEnqueue,
     MergeQueueAutoMerge,
     AlreadyQueued,
@@ -379,6 +380,19 @@ impl App {
                                         item.pr.url
                                     );
                                 }
+                                ApproveMergeMode::AutoMerge => {
+                                    self.debug(&format!(
+                                        "PR #{} merge queue: not used (enable regular auto-merge)",
+                                        item.pr.number
+                                    ));
+                                    println!(
+                                        "  [DRY RUN] Would approve PR #{}{} and enable auto-merge{}: {}",
+                                        item.pr.number,
+                                        marker,
+                                        style(format!(" ({})", item.repo)).dim(),
+                                        item.pr.url
+                                    );
+                                }
                                 ApproveMergeMode::MergeQueueEnqueue => {
                                     self.debug(&format!(
                                         "PR #{} merge queue: used (enqueue)",
@@ -420,11 +434,11 @@ impl App {
                                 }
                                 ApproveMergeMode::AlreadyAutoMergeEnabled => {
                                     self.debug(&format!(
-                                        "PR #{} merge queue: already using auto-merge",
+                                        "PR #{} auto-merge: already enabled",
                                         item.pr.number
                                     ));
                                     println!(
-                                        "  [DRY RUN] Would approve PR #{}{} (auto-merge already enabled for merge queue){}: {}",
+                                        "  [DRY RUN] Would approve PR #{}{} (auto-merge already enabled){}: {}",
                                         item.pr.number,
                                         marker,
                                         style(format!(" ({})", item.repo)).dim(),
@@ -650,6 +664,24 @@ impl App {
                                 style(format!(" ({})", info.repo)).dim()
                             );
                         }
+                        ApproveMergeMode::AutoMerge => {
+                            self.debug(&format!(
+                                "PR #{} merge queue: not used (enable regular auto-merge)",
+                                info.pr_number
+                            ));
+                            self.enable_auto_merge_for_pull_request(
+                                &queue_status.pull_request_id,
+                                &queue_status.head_oid,
+                                merge_method,
+                            )
+                            .await?;
+                            println!(
+                                "  {} Approved PR #{} and enabled auto-merge{}",
+                                style("✓").green(),
+                                info.pr_number,
+                                style(format!(" ({})", info.repo)).dim()
+                            );
+                        }
                         ApproveMergeMode::MergeQueueEnqueue => {
                             self.debug(&format!(
                                 "PR #{} merge queue: used (enqueue)",
@@ -699,7 +731,7 @@ impl App {
                         }
                         ApproveMergeMode::AlreadyAutoMergeEnabled => {
                             self.debug(&format!(
-                                "PR #{} merge queue: already using auto-merge",
+                                "PR #{} auto-merge: already enabled",
                                 info.pr_number
                             ));
                             println!(
@@ -844,12 +876,13 @@ impl App {
         queue_status: &MergeQueueStatus,
         allow_auto_merge: bool,
     ) -> ApproveMergeMode {
+        if queue_status.auto_merge_enabled {
+            return ApproveMergeMode::AlreadyAutoMergeEnabled;
+        }
+
         if queue_status.uses_merge_queue {
             if queue_status.already_queued {
                 return ApproveMergeMode::AlreadyQueued;
-            }
-            if queue_status.auto_merge_enabled {
-                return ApproveMergeMode::AlreadyAutoMergeEnabled;
             }
 
             return match ci_status {
@@ -863,10 +896,10 @@ impl App {
             CiStatus::Passing | CiStatus::Unknown => ApproveMergeMode::Direct,
             CiStatus::Pending if allow_auto_merge => {
                 self.debug(&format!(
-                    "PR #{} merge queue: not used (auto-merge available but disabled for this flow)",
+                    "PR #{} merge queue: not used (enable regular auto-merge)",
                     pr_number
                 ));
-                ApproveMergeMode::SkipPendingWithoutQueue
+                ApproveMergeMode::AutoMerge
             }
             CiStatus::Pending => ApproveMergeMode::SkipPendingWithoutQueue,
             CiStatus::Failing => unreachable!("failing PRs are skipped before planning"),
