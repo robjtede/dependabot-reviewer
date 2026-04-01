@@ -1,4 +1,4 @@
-use std::{io::IsTerminal as _, process::Command, time::Duration};
+use std::{collections::HashMap, io::IsTerminal as _, process::Command, time::Duration};
 
 use console::style;
 use dialoguer::{theme::ColorfulTheme, Confirm, Select};
@@ -199,6 +199,8 @@ impl App {
                 return Ok(performed_action);
             }
 
+            let pending_statuses = self.fetch_pending_review_statuses(&review_items).await?;
+
             println!("  Found {} Dependabot PR(s):", review_items.len());
             println!("  Review state: {}", style(state_path.as_str()).dim());
             let mut current_repo: Option<&str> = None;
@@ -222,13 +224,19 @@ impl App {
                 } else {
                     style("unreviewed").red()
                 };
+                let pending_badge = pending_statuses
+                    .get(item.repo.as_str())
+                    .and_then(|statuses| statuses.get(&item.pr.number))
+                    .map(pending_status_badge);
 
                 println!(
-                    "    {} #{}: {} [{}]\n        {}",
+                    "    {} #{}: {} [{}{}{}]\n        {}",
                     item.pr.ci_status.icon(),
                     item.pr.number,
                     item.pr.title,
                     review_badge,
+                    if pending_badge.is_some() { ", " } else { "" },
+                    pending_badge.unwrap_or_default(),
                     style(&item.pr.url).dim()
                 );
                 if item.pr.dep_update.is_none() {
@@ -644,8 +652,13 @@ impl App {
                         allow_auto_merge,
                     );
 
-                    self.approve_pull_request(&info.owner, &info.repo_name, info.pr_number)
-                        .await?;
+                    if !matches!(merge_mode, ApproveMergeMode::AlreadyQueued)
+                        && !(matches!(merge_mode, ApproveMergeMode::AlreadyAutoMergeEnabled)
+                            && queue_status.uses_merge_queue)
+                    {
+                        self.approve_pull_request(&info.owner, &info.repo_name, info.pr_number)
+                            .await?;
+                    }
 
                     match merge_mode {
                         ApproveMergeMode::Direct => {
@@ -730,16 +743,29 @@ impl App {
                             );
                         }
                         ApproveMergeMode::AlreadyAutoMergeEnabled => {
-                            self.debug(&format!(
-                                "PR #{} auto-merge: already enabled",
-                                info.pr_number
-                            ));
-                            println!(
-                                "  {} Approved PR #{} (auto-merge already enabled){}",
-                                style("✓").green(),
-                                info.pr_number,
-                                style(format!(" ({})", info.repo)).dim()
-                            );
+                            if queue_status.uses_merge_queue {
+                                self.debug(&format!(
+                                    "PR #{} auto-merge: already enabled for merge queue",
+                                    info.pr_number
+                                ));
+                                println!(
+                                    "  {} Approved PR #{} (auto-merge already enabled){}",
+                                    style("✓").green(),
+                                    info.pr_number,
+                                    style(format!(" ({})", info.repo)).dim()
+                                );
+                            } else {
+                                self.debug(&format!(
+                                    "PR #{} auto-merge: already enabled (approval refreshed)",
+                                    info.pr_number
+                                ));
+                                println!(
+                                    "  {} Approved PR #{} (auto-merge already enabled; approval refreshed){}",
+                                    style("✓").green(),
+                                    info.pr_number,
+                                    style(format!(" ({})", info.repo)).dim()
+                                );
+                            }
                         }
                         ApproveMergeMode::SkipPendingWithoutQueue => {
                             self.debug(&format!("PR #{} merge queue: not used", info.pr_number));
@@ -785,6 +811,39 @@ impl App {
 
             println!();
         }
+    }
+
+    async fn fetch_pending_review_statuses(
+        &self,
+        review_items: &[ReviewItem],
+    ) -> Result<HashMap<String, HashMap<u64, MergeQueueStatus>>, Report<AppError>> {
+        let status_tasks = review_items
+            .iter()
+            .filter(|item| item.pr.ci_status == CiStatus::Pending)
+            .map(|item| {
+                let repo = item.repo.clone();
+                let owner = item.owner.clone();
+                let repo_name = item.repo_name.clone();
+                let pr_number = item.pr.number;
+                let base_ref_name = item.pr.base_ref_name.clone();
+
+                async move {
+                    let status = self
+                        .fetch_merge_queue_status(&owner, &repo_name, pr_number, &base_ref_name)
+                        .await?;
+
+                    Ok::<_, Report<_>>((repo, pr_number, status))
+                }
+            });
+
+        let mut statuses = HashMap::<String, HashMap<u64, MergeQueueStatus>>::new();
+        let mut stream = futures_util::stream::iter(status_tasks).buffered_unordered(5);
+        while let Some(result) = stream.next().await {
+            let (repo, pr_number, status) = result?;
+            statuses.entry(repo).or_default().insert(pr_number, status);
+        }
+
+        Ok(statuses)
     }
 
     async fn fetch_merge_queue_status(
@@ -1101,6 +1160,18 @@ fn graphql_data<T>(response: GraphqlResponse<T>) -> Result<T, Report<AppError>> 
         .data
         .ok_or_else(|| Report::new(AppError::Comment))
         .attach("GraphQL response did not include data")
+}
+
+fn pending_status_badge(status: &MergeQueueStatus) -> String {
+    if status.already_queued {
+        format!("{}", style("queued").green())
+    } else if status.auto_merge_enabled {
+        format!("{}", style("auto-merge enabled").green())
+    } else if status.uses_merge_queue {
+        format!("{}", style("not queued").yellow())
+    } else {
+        format!("{}", style("not auto-merge enabled").yellow())
+    }
 }
 
 fn preferred_merge_method(
