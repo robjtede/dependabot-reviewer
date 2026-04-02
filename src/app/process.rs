@@ -652,8 +652,8 @@ impl App {
                         allow_auto_merge,
                     );
 
-                    if !matches!(merge_mode, ApproveMergeMode::AlreadyQueued)
-                        && !(matches!(merge_mode, ApproveMergeMode::AlreadyAutoMergeEnabled)
+                    if !(matches!(merge_mode, ApproveMergeMode::AlreadyQueued)
+                        || matches!(merge_mode, ApproveMergeMode::AlreadyAutoMergeEnabled)
                             && queue_status.uses_merge_queue)
                     {
                         self.approve_pull_request(&info.owner, &info.repo_name, info.pr_number)
