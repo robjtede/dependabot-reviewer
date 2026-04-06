@@ -24,6 +24,10 @@ pub struct Cli {
     #[arg(short, long)]
     pub dry_run: bool,
 
+    /// Attempt approve+merge even when CI is pending or failing.
+    #[arg(long)]
+    pub allow_non_passing_ci: bool,
+
     /// Enable verbose debug logging.
     #[arg(short, long)]
     pub verbose: bool,

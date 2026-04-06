@@ -284,6 +284,26 @@ impl App {
                 PromptChoice::Action(action) => action,
             };
 
+            let allow_non_passing_ci = if matches!(action, Action::ApproveMerge) {
+                if self.cli.allow_non_passing_ci {
+                    true
+                } else if self.cli.action.is_none()
+                    && std::io::stdin().is_terminal()
+                    && std::io::stdout().is_terminal()
+                {
+                    Confirm::with_theme(&ColorfulTheme::default())
+                        .with_prompt("Attempt approve+merge even when CI is pending or failing?")
+                        .default(false)
+                        .interact()
+                        .change_context(AppError::Interactive)
+                        .attach("Non-passing CI confirmation failed")?
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+
             let approve_merge_context = if matches!(action, Action::ApproveMerge) {
                 let mut contexts = std::collections::HashMap::new();
                 for repo in repos {
@@ -337,7 +357,7 @@ impl App {
                             );
                         }
                         Action::ApproveMerge => {
-                            if item.pr.ci_status == CiStatus::Failing {
+                            if item.pr.ci_status == CiStatus::Failing && !allow_non_passing_ci {
                                 println!(
                                     "  [DRY RUN] Would skip PR #{} (CI {}){}: {}",
                                     item.pr.number,
@@ -366,6 +386,7 @@ impl App {
                                 item.pr.ci_status,
                                 &queue_status,
                                 allow_auto_merge,
+                                allow_non_passing_ci,
                             );
 
                             let marker = if previously_reviewed {
@@ -379,14 +400,28 @@ impl App {
                                         "PR #{} merge queue: not used",
                                         item.pr.number
                                     ));
-                                    println!(
-                                        "  [DRY RUN] Would approve and merge PR #{}{} with {:?}{}: {}",
-                                        item.pr.number,
-                                        marker,
-                                        merge_method,
-                                        style(format!(" ({})", item.repo)).dim(),
-                                        item.pr.url
-                                    );
+                                    if allow_non_passing_ci
+                                        && item.pr.ci_status != CiStatus::Passing
+                                    {
+                                        println!(
+                                            "  [DRY RUN] Would attempt approve and merge PR #{}{} with {:?} (CI {}){}: {}",
+                                            item.pr.number,
+                                            marker,
+                                            merge_method,
+                                            item.pr.ci_status,
+                                            style(format!(" ({})", item.repo)).dim(),
+                                            item.pr.url
+                                        );
+                                    } else {
+                                        println!(
+                                            "  [DRY RUN] Would approve and merge PR #{}{} with {:?}{}: {}",
+                                            item.pr.number,
+                                            marker,
+                                            merge_method,
+                                            style(format!(" ({})", item.repo)).dim(),
+                                            item.pr.url
+                                        );
+                                    }
                                 }
                                 ApproveMergeMode::AutoMerge => {
                                     self.debug(&format!(
@@ -419,13 +454,25 @@ impl App {
                                         "PR #{} merge queue: used (auto-merge until queueable)",
                                         item.pr.number
                                     ));
-                                    println!(
-                                        "  [DRY RUN] Would approve PR #{}{} and enable auto-merge for the merge queue{}: {}",
-                                        item.pr.number,
-                                        marker,
-                                        style(format!(" ({})", item.repo)).dim(),
-                                        item.pr.url
-                                    );
+                                    if allow_non_passing_ci
+                                        && item.pr.ci_status == CiStatus::Failing
+                                    {
+                                        println!(
+                                            "  [DRY RUN] Would attempt approval for PR #{}{} and enable auto-merge for the merge queue despite CI failing{}: {}",
+                                            item.pr.number,
+                                            marker,
+                                            style(format!(" ({})", item.repo)).dim(),
+                                            item.pr.url
+                                        );
+                                    } else {
+                                        println!(
+                                            "  [DRY RUN] Would approve PR #{}{} and enable auto-merge for the merge queue{}: {}",
+                                            item.pr.number,
+                                            marker,
+                                            style(format!(" ({})", item.repo)).dim(),
+                                            item.pr.url
+                                        );
+                                    }
                                 }
                                 ApproveMergeMode::AlreadyQueued => {
                                     self.debug(&format!(
@@ -548,7 +595,7 @@ impl App {
                             );
                         }
                         Action::ApproveMerge => {
-                            if item.pr.ci_status != CiStatus::Failing {
+                            if item.pr.ci_status != CiStatus::Failing || allow_non_passing_ci {
                                 merge_infos.push(MergeInfo {
                                     repo: item.repo.clone(),
                                     owner: item.owner.clone(),
@@ -650,6 +697,7 @@ impl App {
                         info.ci_status,
                         &queue_status,
                         allow_auto_merge,
+                        allow_non_passing_ci,
                     );
 
                     if !(matches!(merge_mode, ApproveMergeMode::AlreadyQueued)
@@ -934,6 +982,7 @@ impl App {
         ci_status: CiStatus,
         queue_status: &MergeQueueStatus,
         allow_auto_merge: bool,
+        allow_non_passing_ci: bool,
     ) -> ApproveMergeMode {
         if queue_status.auto_merge_enabled {
             return ApproveMergeMode::AlreadyAutoMergeEnabled;
@@ -946,13 +995,32 @@ impl App {
 
             return match ci_status {
                 CiStatus::Passing | CiStatus::Unknown => ApproveMergeMode::MergeQueueEnqueue,
-                CiStatus::Pending => ApproveMergeMode::MergeQueueAutoMerge,
-                CiStatus::Failing => unreachable!("failing PRs are skipped before planning"),
+                CiStatus::Pending | CiStatus::Failing => {
+                    if allow_non_passing_ci {
+                        ApproveMergeMode::MergeQueueAutoMerge
+                    } else {
+                        ApproveMergeMode::SkipPendingWithoutQueue
+                    }
+                }
             };
         }
 
         match ci_status {
             CiStatus::Passing | CiStatus::Unknown => ApproveMergeMode::Direct,
+            CiStatus::Pending if allow_non_passing_ci => {
+                self.debug(&format!(
+                    "PR #{} merge queue: not used (attempt direct merge despite CI pending)",
+                    pr_number
+                ));
+                ApproveMergeMode::Direct
+            }
+            CiStatus::Failing if allow_non_passing_ci => {
+                self.debug(&format!(
+                    "PR #{} merge queue: not used (attempt direct merge despite CI failing)",
+                    pr_number
+                ));
+                ApproveMergeMode::Direct
+            }
             CiStatus::Pending if allow_auto_merge => {
                 self.debug(&format!(
                     "PR #{} merge queue: not used (enable regular auto-merge)",
@@ -960,8 +1028,7 @@ impl App {
                 ));
                 ApproveMergeMode::AutoMerge
             }
-            CiStatus::Pending => ApproveMergeMode::SkipPendingWithoutQueue,
-            CiStatus::Failing => unreachable!("failing PRs are skipped before planning"),
+            CiStatus::Pending | CiStatus::Failing => ApproveMergeMode::SkipPendingWithoutQueue,
         }
     }
 
