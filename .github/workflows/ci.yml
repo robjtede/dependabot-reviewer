@@ -27,7 +27,7 @@ jobs:
           components: clippy
 
       - name: Install just,nextest
-        uses: taiki-e/install-action@7a562dfa955aa2e4d5b0fd6ebd57ff9715c07b0b # v2.73.0
+        uses: taiki-e/install-action@51cd0b8c0499559d9a4d75c0f5c67bec3a894ec8 # v2.75.28
         with:
           tool: just,cargo-nextest
 
