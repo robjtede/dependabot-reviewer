@@ -154,7 +154,7 @@ impl App {
                     println!("Opened unreviewed PRs in your browser.");
                 }
                 Action::ApproveMerge => {
-                    println!("All selected PRs have been approved and merged.");
+                    println!("Finished processing selected PRs for approval and merge.");
                 }
                 Action::Rebase => {
                     println!("Dependabot will rebase each PR automatically.");

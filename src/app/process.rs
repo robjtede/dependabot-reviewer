@@ -53,6 +53,11 @@ enum ApproveMergeMode {
     SkipPendingWithoutQueue,
 }
 
+enum EnqueuePullRequestOutcome {
+    Queued,
+    AwaitingRequiredChecks,
+}
+
 enum PromptChoice {
     Refresh,
     Action(Action),
@@ -748,17 +753,40 @@ impl App {
                                 "PR #{} merge queue: used (enqueue)",
                                 info.pr_number
                             ));
-                            self.enqueue_pull_request(
-                                &queue_status.pull_request_id,
-                                &queue_status.head_oid,
-                            )
-                            .await?;
-                            println!(
-                                "  {} Approved PR #{} and added it to the merge queue{}",
-                                style("✓").green(),
-                                info.pr_number,
-                                style(format!(" ({})", info.repo)).dim()
-                            );
+                            match self
+                                .enqueue_pull_request(
+                                    &queue_status.pull_request_id,
+                                    &queue_status.head_oid,
+                                )
+                                .await?
+                            {
+                                EnqueuePullRequestOutcome::Queued => {
+                                    println!(
+                                        "  {} Approved PR #{} and added it to the merge queue{}",
+                                        style("✓").green(),
+                                        info.pr_number,
+                                        style(format!(" ({})", info.repo)).dim()
+                                    );
+                                }
+                                EnqueuePullRequestOutcome::AwaitingRequiredChecks => {
+                                    self.debug(&format!(
+                                        "PR #{} cannot enter the merge queue yet; enabling auto-merge",
+                                        info.pr_number
+                                    ));
+                                    self.enable_auto_merge_for_pull_request(
+                                        &queue_status.pull_request_id,
+                                        &queue_status.head_oid,
+                                        merge_method,
+                                    )
+                                    .await?;
+                                    println!(
+                                        "  {} Approved PR #{} and enabled auto-merge while required checks complete{}",
+                                        style("✓").green(),
+                                        info.pr_number,
+                                        style(format!(" ({})", info.repo)).dim()
+                                    );
+                                }
+                            }
                         }
                         ApproveMergeMode::MergeQueueAutoMerge => {
                             self.debug(&format!(
@@ -1124,7 +1152,7 @@ impl App {
         &self,
         pull_request_id: &str,
         expected_head_oid: &str,
-    ) -> Result<(), Report<AppError>> {
+    ) -> Result<EnqueuePullRequestOutcome, Report<AppError>> {
         const MUTATION: &str = r#"
             mutation EnqueuePullRequest($pullRequestId: ID!, $expectedHeadOid: GitObjectID!) {
               enqueuePullRequest(
@@ -1151,15 +1179,7 @@ impl App {
             .await
             .change_context(AppError::Comment)
             .attach("Failed to enqueue pull request")?;
-        let data = graphql_data(response)
-            .change_context(AppError::Comment)
-            .attach("Invalid enqueuePullRequest response")?;
-        let _merge_queue_entry = data
-            .enqueue_pull_request
-            .and_then(|payload| payload.merge_queue_entry)
-            .ok_or_else(|| Report::new(AppError::Comment))
-            .attach("enqueuePullRequest did not return a merge queue entry")?;
-        Ok(())
+        enqueue_pull_request_outcome(response)
     }
 
     async fn enable_auto_merge_for_pull_request(
@@ -1229,6 +1249,29 @@ fn graphql_data<T>(response: GraphqlResponse<T>) -> Result<T, Report<AppError>> 
         .attach("GraphQL response did not include data")
 }
 
+fn enqueue_pull_request_outcome(
+    response: GraphqlResponse<MutationOnlyResponse>,
+) -> Result<EnqueuePullRequestOutcome, Report<AppError>> {
+    if !response.errors.is_empty()
+        && response.errors.iter().all(|error| {
+            error.message.contains("required status check") && error.message.contains(" expected")
+        })
+    {
+        return Ok(EnqueuePullRequestOutcome::AwaitingRequiredChecks);
+    }
+
+    let data = graphql_data(response)
+        .change_context(AppError::Comment)
+        .attach("Invalid enqueuePullRequest response")?;
+    let _merge_queue_entry = data
+        .enqueue_pull_request
+        .and_then(|payload| payload.merge_queue_entry)
+        .ok_or_else(|| Report::new(AppError::Comment))
+        .attach("enqueuePullRequest did not return a merge queue entry")?;
+
+    Ok(EnqueuePullRequestOutcome::Queued)
+}
+
 fn pending_status_badge(status: &MergeQueueStatus) -> String {
     if status.already_queued {
         format!("{}", style("queued").green())
@@ -1276,4 +1319,61 @@ fn open_in_browser(url: &str) -> Result<(), Report<AppError>> {
             .attach_with(|| format!("open failed for {}", url));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn falls_back_to_auto_merge_when_required_checks_are_expected() {
+        let response = GraphqlResponse {
+            data: None,
+            errors: vec![GraphqlError {
+                message: "Pull request 4 of 4 required status checks are expected.".to_string(),
+            }],
+        };
+
+        let outcome = enqueue_pull_request_outcome(response).expect("expected fallback outcome");
+
+        assert!(matches!(
+            outcome,
+            EnqueuePullRequestOutcome::AwaitingRequiredChecks
+        ));
+    }
+
+    #[test]
+    fn returns_queued_when_enqueue_mutation_succeeds() {
+        let response = GraphqlResponse {
+            data: Some(MutationOnlyResponse {
+                enqueue_pull_request: Some(EnqueuePullRequestPayload {
+                    merge_queue_entry: Some(GraphqlNode {
+                        id: "queue-entry-id".to_string(),
+                    }),
+                }),
+                enable_pull_request_auto_merge: None,
+            }),
+            errors: Vec::new(),
+        };
+
+        let outcome = enqueue_pull_request_outcome(response).expect("expected queued outcome");
+
+        assert!(matches!(outcome, EnqueuePullRequestOutcome::Queued));
+    }
+
+    #[test]
+    fn preserves_unrelated_enqueue_errors() {
+        let response = GraphqlResponse::<MutationOnlyResponse> {
+            data: None,
+            errors: vec![GraphqlError {
+                message: "Pull request is not mergeable".to_string(),
+            }],
+        };
+
+        let Err(report) = enqueue_pull_request_outcome(response) else {
+            panic!("expected enqueue error");
+        };
+
+        assert!(format!("{report:?}").contains("Pull request is not mergeable"));
+    }
 }
