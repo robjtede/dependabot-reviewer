@@ -69,18 +69,6 @@ struct GraphqlRequest<'a, T> {
     variables: T,
 }
 
-#[derive(Deserialize)]
-struct GraphqlResponse<T> {
-    data: Option<T>,
-    #[serde(default)]
-    errors: Vec<GraphqlError>,
-}
-
-#[derive(Deserialize)]
-struct GraphqlError {
-    message: String,
-}
-
 #[derive(Serialize)]
 struct MergeQueueStatusVariables<'a> {
     owner: &'a str,
@@ -321,7 +309,7 @@ impl App {
                         .repos(owner, repo_name)
                         .get()
                         .await
-                        .change_context(AppError::Comment)
+                        .change_context(AppError::ApproveMerge)
                         .attach_with(|| format!("Failed to get repo info for {}", repo))?;
                     contexts.insert(
                         repo.clone(),
@@ -691,7 +679,7 @@ impl App {
                             &info.base_ref_name,
                         )
                         .await
-                        .change_context(AppError::Comment)
+                        .change_context(AppError::ApproveMerge)
                         .attach(format!(
                             "Failed to inspect merge strategy for PR #{}",
                             info.pr_number
@@ -944,7 +932,7 @@ impl App {
         "#;
 
         let number = i64::try_from(pr_number)
-            .change_context(AppError::Comment)
+            .change_context(AppError::GitHubApi)
             .attach_with(|| format!("PR #{} number is too large for GraphQL", pr_number))?;
         let payload = GraphqlRequest {
             query: QUERY,
@@ -955,31 +943,25 @@ impl App {
                 base_branch: base_ref_name,
             },
         };
-        let response: GraphqlResponse<MergeQueueStatusData> = self
+        let data: MergeQueueStatusData = self
             .octocrab
             .graphql(&payload)
             .await
-            .change_context(AppError::Comment)
+            .change_context(AppError::GitHubApi)
             .attach(format!(
                 "Failed to query merge queue status for PR #{}",
                 pr_number
             ))?;
-        let data = graphql_data(response)
-            .change_context(AppError::Comment)
-            .attach(format!(
-                "Invalid merge queue status response for PR #{}",
-                pr_number
-            ))?;
         let repository = data
             .repository
-            .ok_or_else(|| Report::new(AppError::Comment))
+            .ok_or_else(|| Report::new(AppError::GitHubApi))
             .attach(format!(
                 "Repository missing in GraphQL response for PR #{}",
                 pr_number
             ))?;
         let pull_request = repository
             .pull_request
-            .ok_or_else(|| Report::new(AppError::Comment))
+            .ok_or_else(|| Report::new(AppError::GitHubApi))
             .attach(format!(
                 "Pull request missing in GraphQL response for PR #{}",
                 pr_number
@@ -1070,7 +1052,7 @@ impl App {
         let pr_data = pulls
             .get(pr_number)
             .await
-            .change_context(AppError::Comment)
+            .change_context(AppError::ApproveMerge)
             .attach(format!("Failed to get PR #{}", pr_number))?;
         let head_sha = pr_data.head.sha;
 
@@ -1083,7 +1065,7 @@ impl App {
             .reviews()
             .create_review(head_sha, "", ReviewAction::Approve, Vec::new())
             .await
-            .change_context(AppError::Comment)
+            .change_context(AppError::ApproveMerge)
             .attach(format!("Failed to approve PR #{}", pr_number))?;
 
         Ok(())
@@ -1104,7 +1086,7 @@ impl App {
             let pr_data = pulls
                 .get(pr_number)
                 .await
-                .change_context(AppError::Comment)
+                .change_context(AppError::ApproveMerge)
                 .attach(format!("Failed to get PR #{}", pr_number))?;
 
             let head_sha = pr_data.head.sha;
@@ -1137,10 +1119,12 @@ impl App {
                     tokio::time::sleep(delay).await;
                 }
                 Err(e) => {
-                    return Err(e).change_context(AppError::Comment).attach(format!(
-                        "Failed to merge PR #{} after {} attempts",
-                        pr_number, MAX_ATTEMPTS
-                    ));
+                    return Err(e)
+                        .change_context(AppError::ApproveMerge)
+                        .attach(format!(
+                            "Failed to merge PR #{} after {} attempts",
+                            pr_number, MAX_ATTEMPTS
+                        ));
                 }
             }
         }
@@ -1173,13 +1157,19 @@ impl App {
                 expected_head_oid,
             },
         };
-        let response: GraphqlResponse<MutationOnlyResponse> = self
-            .octocrab
-            .graphql(&payload)
-            .await
-            .change_context(AppError::Comment)
-            .attach("Failed to enqueue pull request")?;
-        enqueue_pull_request_outcome(response)
+        let data: MutationOnlyResponse = match self.octocrab.graphql(&payload).await {
+            Ok(data) => data,
+            Err(error) if graphql_error_is_awaiting_required_checks(&error) => {
+                return Ok(EnqueuePullRequestOutcome::AwaitingRequiredChecks);
+            }
+            Err(error) => {
+                return Err(error)
+                    .change_context(AppError::ApproveMerge)
+                    .attach("Failed to enqueue pull request");
+            }
+        };
+
+        enqueue_pull_request_outcome(data)
     }
 
     async fn enable_auto_merge_for_pull_request(
@@ -1214,59 +1204,48 @@ impl App {
                 merge_method: graphql_merge_method(merge_method),
             },
         };
-        let response: GraphqlResponse<MutationOnlyResponse> = self
+        let data: MutationOnlyResponse = self
             .octocrab
             .graphql(&payload)
             .await
-            .change_context(AppError::Comment)
+            .change_context(AppError::ApproveMerge)
             .attach("Failed to enable pull request auto-merge")?;
-        let data = graphql_data(response)
-            .change_context(AppError::Comment)
-            .attach("Invalid enablePullRequestAutoMerge response")?;
         let _pull_request = data
             .enable_pull_request_auto_merge
             .and_then(|payload| payload.pull_request)
-            .ok_or_else(|| Report::new(AppError::Comment))
+            .ok_or_else(|| Report::new(AppError::ApproveMerge))
             .attach("enablePullRequestAutoMerge did not return a pull request")?;
         Ok(())
     }
 }
 
-fn graphql_data<T>(response: GraphqlResponse<T>) -> Result<T, Report<AppError>> {
-    if !response.errors.is_empty() {
-        let messages = response
-            .errors
-            .into_iter()
-            .map(|error| error.message)
-            .collect::<Vec<_>>()
-            .join("; ");
-        return Err(Report::new(AppError::Comment)).attach(messages);
-    }
+fn graphql_error_is_awaiting_required_checks(error: &octocrab::Error) -> bool {
+    let octocrab::Error::Graphql { source, .. } = error else {
+        return false;
+    };
 
-    response
-        .data
-        .ok_or_else(|| Report::new(AppError::Comment))
-        .attach("GraphQL response did not include data")
+    messages_are_awaiting_required_checks(source.0.iter().map(|error| error.message.as_str()))
+}
+
+fn messages_are_awaiting_required_checks<'a>(messages: impl IntoIterator<Item = &'a str>) -> bool {
+    let mut messages = messages.into_iter();
+    let Some(first) = messages.next() else {
+        return false;
+    };
+
+    let is_expected_checks_error =
+        |message: &str| message.contains("required status check") && message.contains(" expected");
+
+    is_expected_checks_error(first) && messages.all(is_expected_checks_error)
 }
 
 fn enqueue_pull_request_outcome(
-    response: GraphqlResponse<MutationOnlyResponse>,
+    data: MutationOnlyResponse,
 ) -> Result<EnqueuePullRequestOutcome, Report<AppError>> {
-    if !response.errors.is_empty()
-        && response.errors.iter().all(|error| {
-            error.message.contains("required status check") && error.message.contains(" expected")
-        })
-    {
-        return Ok(EnqueuePullRequestOutcome::AwaitingRequiredChecks);
-    }
-
-    let data = graphql_data(response)
-        .change_context(AppError::Comment)
-        .attach("Invalid enqueuePullRequest response")?;
     let _merge_queue_entry = data
         .enqueue_pull_request
         .and_then(|payload| payload.merge_queue_entry)
-        .ok_or_else(|| Report::new(AppError::Comment))
+        .ok_or_else(|| Report::new(AppError::ApproveMerge))
         .attach("enqueuePullRequest did not return a merge queue entry")?;
 
     Ok(EnqueuePullRequestOutcome::Queued)
@@ -1295,7 +1274,7 @@ fn preferred_merge_method(
         (Some(true), _, _) => Ok(MergeMethod::Merge),
         (Some(false), Some(true), _) => Ok(MergeMethod::Squash),
         (Some(false), Some(false), Some(true)) => Ok(MergeMethod::Rebase),
-        _ => Err(Report::new(AppError::Comment)).attach("No merge method available"),
+        _ => Err(Report::new(AppError::ApproveMerge)).attach("No merge method available"),
     }
 }
 
@@ -1326,54 +1305,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn falls_back_to_auto_merge_when_required_checks_are_expected() {
-        let response = GraphqlResponse {
-            data: None,
-            errors: vec![GraphqlError {
-                message: "Pull request 4 of 4 required status checks are expected.".to_string(),
-            }],
-        };
-
-        let outcome = enqueue_pull_request_outcome(response).expect("expected fallback outcome");
-
-        assert!(matches!(
-            outcome,
-            EnqueuePullRequestOutcome::AwaitingRequiredChecks
-        ));
+    fn classifies_required_checks_expected_errors() {
+        assert!(messages_are_awaiting_required_checks([
+            "Pull request 4 of 4 required status checks are expected."
+        ]));
     }
 
     #[test]
     fn returns_queued_when_enqueue_mutation_succeeds() {
-        let response = GraphqlResponse {
-            data: Some(MutationOnlyResponse {
-                enqueue_pull_request: Some(EnqueuePullRequestPayload {
-                    merge_queue_entry: Some(GraphqlNode {
-                        id: "queue-entry-id".to_string(),
-                    }),
+        let data = MutationOnlyResponse {
+            enqueue_pull_request: Some(EnqueuePullRequestPayload {
+                merge_queue_entry: Some(GraphqlNode {
+                    id: "queue-entry-id".to_string(),
                 }),
-                enable_pull_request_auto_merge: None,
             }),
-            errors: Vec::new(),
+            enable_pull_request_auto_merge: None,
         };
 
-        let outcome = enqueue_pull_request_outcome(response).expect("expected queued outcome");
+        let outcome = enqueue_pull_request_outcome(data).expect("expected queued outcome");
 
         assert!(matches!(outcome, EnqueuePullRequestOutcome::Queued));
     }
 
     #[test]
-    fn preserves_unrelated_enqueue_errors() {
-        let response = GraphqlResponse::<MutationOnlyResponse> {
-            data: None,
-            errors: vec![GraphqlError {
-                message: "Pull request is not mergeable".to_string(),
-            }],
-        };
-
-        let Err(report) = enqueue_pull_request_outcome(response) else {
-            panic!("expected enqueue error");
-        };
-
-        assert!(format!("{report:?}").contains("Pull request is not mergeable"));
+    fn rejects_unrelated_or_empty_graphql_errors() {
+        assert!(!messages_are_awaiting_required_checks([
+            "Pull request is not mergeable"
+        ]));
+        assert!(!messages_are_awaiting_required_checks([]));
     }
 }

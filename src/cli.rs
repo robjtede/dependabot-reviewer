@@ -20,7 +20,7 @@ pub struct Cli {
     #[arg(short, long)]
     pub confirm: bool,
 
-    /// Dry run - show what would be done without actually commenting.
+    /// Dry run - show what would be done without performing the selected action.
     #[arg(short, long)]
     pub dry_run: bool,
 

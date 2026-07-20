@@ -147,7 +147,7 @@ impl App {
         println!("{}", style("Done!").green().bold());
 
         if self.cli.dry_run {
-            println!("Run without --dry-run to actually comment on PRs.");
+            println!("Run without --dry-run to perform the selected action.");
         } else if let Some(action) = performed_action {
             match action {
                 Action::OpenUnreviewedInBrowser => {
