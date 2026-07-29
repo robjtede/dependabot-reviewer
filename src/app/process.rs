@@ -60,6 +60,7 @@ enum EnqueuePullRequestOutcome {
 
 enum PromptChoice {
     Refresh,
+    PrintFailingCiPrompt,
     Action(Action),
 }
 
@@ -250,6 +251,7 @@ impl App {
                     "Open Unreviewed In Browser",
                     "Rebase",
                     "Recreate",
+                    "Print Agent Prompt for Failing CI",
                     "Refresh PR State",
                 ];
                 let selection = Select::with_theme(&ColorfulTheme::default())
@@ -264,7 +266,8 @@ impl App {
                     1 => PromptChoice::Action(Action::OpenUnreviewedInBrowser),
                     2 => PromptChoice::Action(Action::Rebase),
                     3 => PromptChoice::Action(Action::Recreate),
-                    4 => PromptChoice::Refresh,
+                    4 => PromptChoice::PrintFailingCiPrompt,
+                    5 => PromptChoice::Refresh,
                     _ => unreachable!(),
                 }
             };
@@ -273,6 +276,13 @@ impl App {
                 PromptChoice::Refresh => {
                     println!();
                     continue;
+                }
+                PromptChoice::PrintFailingCiPrompt => {
+                    match failing_ci_agent_prompt(&review_items) {
+                        Some(prompt) => println!("{}", prompt),
+                        None => println!("  No Dependabot PRs have failing CI."),
+                    }
+                    return Ok(performed_action);
                 }
                 PromptChoice::Action(action) => action,
             };
@@ -1300,6 +1310,37 @@ fn open_in_browser(url: &str) -> Result<(), Report<AppError>> {
     Ok(())
 }
 
+fn failing_ci_agent_prompt(review_items: &[ReviewItem]) -> Option<String> {
+    let failing_items = review_items
+        .iter()
+        .filter(|item| item.pr.ci_status == CiStatus::Failing)
+        .collect::<Vec<_>>();
+
+    if failing_items.is_empty() {
+        return None;
+    }
+
+    let mut prompt = String::from("Triage the failing CI for these Dependabot pull requests:\n\n");
+
+    for item in failing_items {
+        prompt.push_str(&format!(
+            "- {}#{}: {}\n  {}\n",
+            item.repo, item.pr.number, item.pr.title, item.pr.url
+        ));
+    }
+
+    prompt.push_str(
+        "\nFor each pull request, inspect the failing checks and scan the relevant logs briefly. \
+Categorize the failure as a dependency regression, repository issue, CI or infrastructure \
+issue, flaky failure, unrelated existing failure, or unclear. Summarize the evidence for the \
+category. Suggest a fix when one is obvious from the logs or surrounding context. Group pull \
+requests that share the same failure when useful. Do not make changes. State when a failure \
+needs deeper investigation.",
+    );
+
+    Some(prompt)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1333,5 +1374,50 @@ mod tests {
             "Pull request is not mergeable"
         ]));
         assert!(!messages_are_awaiting_required_checks([]));
+    }
+
+    #[test]
+    fn agent_prompt_lists_only_prs_with_failing_ci() {
+        let review_items = [
+            review_item(12, "Bump serde from 1.0.0 to 1.0.1", CiStatus::Failing),
+            review_item(11, "Bump tokio from 1.0.0 to 1.1.0", CiStatus::Passing),
+        ];
+
+        let prompt = failing_ci_agent_prompt(&review_items).expect("expected agent prompt");
+
+        assert!(prompt.contains("example/repo#12"));
+        assert!(prompt.contains("Bump serde from 1.0.0 to 1.0.1"));
+        assert!(prompt.contains("https://github.com/example/repo/pull/12"));
+        assert!(!prompt.contains("example/repo#11"));
+        assert!(prompt.contains("Categorize the failure"));
+        assert!(prompt.contains("Suggest a fix when one is obvious"));
+    }
+
+    #[test]
+    fn agent_prompt_is_absent_without_failing_ci() {
+        let review_items = [review_item(
+            11,
+            "Bump tokio from 1.0.0 to 1.1.0",
+            CiStatus::Passing,
+        )];
+
+        assert!(failing_ci_agent_prompt(&review_items).is_none());
+    }
+
+    fn review_item(number: u64, title: &str, ci_status: CiStatus) -> ReviewItem {
+        ReviewItem {
+            repo: "example/repo".to_string(),
+            owner: "example".to_string(),
+            repo_name: "repo".to_string(),
+            pr: PrInfo {
+                number,
+                title: title.to_string(),
+                url: format!("https://github.com/example/repo/pull/{}", number),
+                base_ref_name: "main".to_string(),
+                head_sha: "abc123".to_string(),
+                ci_status,
+                dep_update: None,
+            },
+        }
     }
 }
