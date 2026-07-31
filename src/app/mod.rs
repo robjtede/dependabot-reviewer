@@ -35,7 +35,11 @@ impl App {
                 ))?;
         }
 
-        let mut token = std::env::var("GITHUB_TOKEN").ok();
+        let mut token = if cli.use_gh_auth_token {
+            Some(Self::gh_auth_token()?)
+        } else {
+            std::env::var("GITHUB_TOKEN").ok()
+        };
 
         if token.is_none() && !cli.dry_run {
             let gh_check = Command::new("gh").arg("--version").output();
@@ -48,20 +52,8 @@ impl App {
                     .map_err(|_| Report::new(AppError::Interactive))?;
 
                 if use_gh {
-                    let output = Command::new("gh")
-                        .args(["auth", "token"])
-                        .output()
-                        .change_context(AppError::Initialization)
-                        .attach("Failed to run 'gh auth token'")?;
-
-                    if output.status.success() {
-                        let t = String::from_utf8(output.stdout)
-                            .change_context(AppError::Initialization)?
-                            .trim()
-                            .to_string();
-                        if !t.is_empty() {
-                            token = Some(t);
-                        }
+                    if let Ok(gh_token) = Self::gh_auth_token() {
+                        token = Some(gh_token);
                     }
                 }
             }
@@ -82,6 +74,31 @@ impl App {
             .attach("Failed to build Octocrab client")?;
 
         Ok(Self { cli, octocrab })
+    }
+
+    fn gh_auth_token() -> Result<String, Report<AppError>> {
+        let output = Command::new("gh")
+            .args(["auth", "token"])
+            .output()
+            .change_context(AppError::Initialization)
+            .attach("Failed to run 'gh auth token'")?;
+
+        if !output.status.success() {
+            return Err(Report::new(AppError::Initialization)
+                .attach("'gh auth token' failed. Authenticate with 'gh auth login'."));
+        }
+
+        let token = String::from_utf8(output.stdout)
+            .change_context(AppError::Initialization)?
+            .trim()
+            .to_string();
+
+        if token.is_empty() {
+            return Err(Report::new(AppError::Initialization)
+                .attach("'gh auth token' returned an empty token."));
+        }
+
+        Ok(token)
     }
 
     pub fn update_default_orgs(orgs: Vec<String>) -> Result<(), Report<AppError>> {

@@ -28,6 +28,10 @@ pub struct Cli {
     #[arg(long)]
     pub allow_non_passing_ci: bool,
 
+    /// Get the GitHub token from `gh auth token`.
+    #[arg(long)]
+    pub use_gh_auth_token: bool,
+
     /// Enable verbose debug logging.
     #[arg(short, long)]
     pub verbose: bool,
@@ -43,4 +47,19 @@ pub enum Action {
     ApproveMerge,
     Rebase,
     Recreate,
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser as _;
+
+    use super::Cli;
+
+    #[test]
+    fn parses_use_gh_auth_token() {
+        let cli = Cli::try_parse_from(["dependabot-reviewer", "--use-gh-auth-token"])
+            .expect("flag should parse");
+
+        assert!(cli.use_gh_auth_token);
+    }
 }
