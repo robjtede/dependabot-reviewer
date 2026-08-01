@@ -6,6 +6,14 @@ The program uses `GITHUB_TOKEN`. In an interactive terminal, it can also use the
 
 ## Install
 
+Install a prebuilt binary with [`cargo-binstall`](https://github.com/cargo-bins/cargo-binstall):
+
+```sh
+cargo binstall dependabot-reviewer
+```
+
+Or build and install from source:
+
 ```sh
 cargo install dependabot-reviewer
 ```
