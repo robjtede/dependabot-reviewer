@@ -7,6 +7,7 @@ on:
     types: [checks_requested]
   pull_request:
     branches: [main]
+    types: [opened, ready_for_review, reopened, synchronize]
 
 permissions:
   contents: read
@@ -17,6 +18,7 @@ concurrency:
 
 jobs:
   check:
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
