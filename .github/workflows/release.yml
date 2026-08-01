@@ -38,6 +38,12 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
           GITHUB_TOKEN: ${{ github.token }}
 
+      - name: Comment on release PR
+        if: ${{ steps.release-plz.outputs.releases_created == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/comment-release-pr '${{ steps.release-plz.outputs.releases }}' '${{ github.sha }}'
+
   upload-assets:
     name: Upload release assets
     needs: release
@@ -99,3 +105,19 @@ jobs:
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
           subject-path: "${{ steps.upload-release.outputs.archive }}.*"
+
+  release-assets-uploaded:
+    name: Release assets uploaded
+    needs:
+      - release
+      - upload-assets
+    if: ${{ needs.release.outputs.releases_created == 'true' }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Comment on release PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/comment-release-assets-uploaded '${{ needs.release.outputs.releases }}' '${{ github.sha }}'

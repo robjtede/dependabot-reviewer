@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+
+# Comments on the merged release PR after release assets finish uploading.
+
+set -eEuo pipefail
+
+RELEASE_PLZ_RELEASES_JSON="$1"
+COMMIT_SHA="${2:-${GITHUB_SHA:-}}"
+MARKER="<!-- dependabot-reviewer:release-assets-uploaded -->"
+
+if [[ -z "$COMMIT_SHA" ]]; then
+    echo "No commit SHA provided; skipping release assets comment"
+    exit 0
+fi
+
+if [[ -z "${GITHUB_REPOSITORY:-}" ]]; then
+    echo "GITHUB_REPOSITORY is not set; skipping release assets comment"
+    exit 0
+fi
+
+pr_number="$(
+    gh api \
+        "/repos/${GITHUB_REPOSITORY}/commits/${COMMIT_SHA}/pulls" \
+        --jq '[.[] | select(.merged_at != null)] | sort_by(.number) | last | .number // empty'
+)"
+
+if [[ -z "$pr_number" ]]; then
+    echo "No merged PR found for ${COMMIT_SHA}; skipping release assets comment"
+    exit 0
+fi
+
+release_lines=""
+
+while read -r release; do
+    tag="$(echo "$release" | jq -r '.tag')"
+    version="$(echo "$release" | jq -r '.version')"
+    package_name="$(echo "$release" | jq -r '.package_name')"
+    release_url="$(gh release view "$tag" --json url --jq '.url')"
+
+    release_lines+="- ${package_name} ${version}: ${release_url}"$'\n'
+done < <(echo "$RELEASE_PLZ_RELEASES_JSON" | jq -c '.[]')
+
+if [[ -z "$release_lines" ]]; then
+    echo "No release URLs found; skipping release assets comment"
+    exit 0
+fi
+
+body="${MARKER}"$'\n'"Release assets uploaded:"$'\n\n'"${release_lines}"
+
+existing_comment_id="$(
+    gh api \
+        "/repos/${GITHUB_REPOSITORY}/issues/${pr_number}/comments" \
+        --paginate \
+        --jq ".[] | select(.body | contains(\"${MARKER}\")) | .id" \
+        | tail -n 1
+)"
+
+if [[ -n "$existing_comment_id" ]]; then
+    gh api \
+        --method PATCH \
+        "/repos/${GITHUB_REPOSITORY}/issues/comments/${existing_comment_id}" \
+        -f body="$body" \
+        >/dev/null
+else
+    gh pr comment "$pr_number" --body "$body"
+fi
