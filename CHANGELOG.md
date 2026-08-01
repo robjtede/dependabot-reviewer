@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+## [0.1.1](https://github.com/robjtede/dependabot-reviewer/compare/v0.1.0...v0.1.1) - 2026-08-01
+
+### Added
+
+- guide first-time setup
+
+### Other
+
+- add cargo-binstall installation
+
 ## [0.1.0](https://github.com/robjtede/dependabot-reviewer/compare/v0.0.0...v0.1.0) - 2026-08-01
 
 ### Added
