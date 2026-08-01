@@ -8,4 +8,4 @@ updates:
     directory: /
     schedule:
       interval: weekly
-    versioning-strategy: lockfile-only
+    versioning-strategy: increase-if-necessary
