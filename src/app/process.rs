@@ -46,7 +46,15 @@ impl PrStatusRows {
             return None;
         }
 
-        let multi_progress = MultiProgress::with_draw_target(ProgressDrawTarget::stdout());
+        Some(Self::with_draw_target(prs, ProgressDrawTarget::stdout()))
+    }
+
+    fn with_draw_target(
+        prs: impl IntoIterator<Item = (String, u64)>,
+        draw_target: ProgressDrawTarget,
+    ) -> Self {
+        let multi_progress = MultiProgress::with_draw_target(draw_target);
+        multi_progress.set_move_cursor(true);
         let style = ProgressStyle::with_template("  {spinner:.dim} {msg}")
             .expect("progress status template is valid");
         let mut bars = HashMap::new();
@@ -59,10 +67,10 @@ impl PrStatusRows {
             bars.insert((repo, pr_number), bar);
         }
 
-        Some(Self {
+        Self {
             _multi_progress: multi_progress,
             bars,
-        })
+        }
     }
 
     fn update(&self, repo: &str, pr_number: u64, status: &str) {
@@ -72,15 +80,26 @@ impl PrStatusRows {
     }
 
     fn finish_success(&self, repo: &str, pr_number: u64, status: &str) {
-        if let Some(bar) = self.bars.get(&(repo.to_owned(), pr_number)) {
-            bar.finish_with_message(Self::message(repo, pr_number, &format!("✓ {status}")));
-        }
+        self.complete(repo, pr_number, &format!("✓ {status}"));
     }
 
     fn finish_skipped(&self, repo: &str, pr_number: u64, status: &str) {
+        self.complete(repo, pr_number, &format!("⊘ {status}"));
+    }
+
+    fn complete(&self, repo: &str, pr_number: u64, status: &str) {
         if let Some(bar) = self.bars.get(&(repo.to_owned(), pr_number)) {
-            bar.finish_with_message(Self::message(repo, pr_number, &format!("⊘ {status}")));
+            bar.disable_steady_tick();
+            bar.set_style(
+                ProgressStyle::with_template("  {msg}")
+                    .expect("completed status template is valid"),
+            );
+            bar.set_message(Self::message(repo, pr_number, status));
         }
+    }
+
+    fn finish(&self) {
+        println!();
     }
 
     fn message(repo: &str, pr_number: u64, status: &str) -> String {
@@ -116,6 +135,10 @@ enum PromptChoice {
     Refresh,
     PrintFailingCiPrompt,
     Action(Action),
+}
+
+fn should_render_status_rows(dry_run: bool, verbose: bool) -> bool {
+    !dry_run && !verbose
 }
 
 #[derive(Serialize)]
@@ -391,15 +414,16 @@ impl App {
             let mut comment_tasks = Vec::new();
             let mut merge_infos: Vec<MergeInfo> = Vec::new();
             let mut state_changed = false;
-            let mut pr_statuses = (!self.cli.dry_run && !matches!(action, Action::ApproveMerge))
-                .then(|| {
-                    PrStatusRows::new(
-                        review_items
-                            .iter()
-                            .map(|item| (item.repo.clone(), item.pr.number)),
-                    )
-                })
-                .flatten();
+            let mut pr_statuses = (should_render_status_rows(self.cli.dry_run, self.cli.verbose)
+                && !matches!(action, Action::ApproveMerge))
+            .then(|| {
+                PrStatusRows::new(
+                    review_items
+                        .iter()
+                        .map(|item| (item.repo.clone(), item.pr.number)),
+                )
+            })
+            .flatten();
 
             for item in &review_items {
                 let previously_reviewed = item
@@ -787,7 +811,7 @@ impl App {
                     }
                 }
 
-                if pr_statuses.is_none() {
+                if !self.cli.verbose && pr_statuses.is_none() {
                     pr_statuses = PrStatusRows::new(
                         merge_infos
                             .iter()
@@ -1065,6 +1089,10 @@ impl App {
 
                     performed_action = Some(action);
                 }
+            }
+
+            if let Some(statuses) = pr_statuses.take() {
+                statuses.finish();
             }
 
             if state_changed {
@@ -1547,7 +1575,101 @@ needs deeper investigation.",
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        io,
+        sync::{Arc, Mutex},
+    };
+
+    use indicatif::TermLike;
+
     use super::*;
+
+    #[derive(Clone, Debug, Default)]
+    struct RecordingTerm {
+        clears: Arc<Mutex<usize>>,
+    }
+
+    impl RecordingTerm {
+        fn clear_count(&self) -> usize {
+            *self.clears.lock().expect("recording term lock")
+        }
+
+        fn reset(&self) {
+            *self.clears.lock().expect("recording term lock") = 0;
+        }
+    }
+
+    impl TermLike for RecordingTerm {
+        fn width(&self) -> u16 {
+            120
+        }
+
+        fn move_cursor_up(&self, _: usize) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn move_cursor_down(&self, _: usize) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn move_cursor_right(&self, _: usize) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn move_cursor_left(&self, _: usize) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn write_line(&self, _: &str) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn write_str(&self, _: &str) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn clear_line(&self) -> io::Result<()> {
+            *self.clears.lock().expect("recording term lock") += 1;
+            Ok(())
+        }
+
+        fn flush(&self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn status_rows_reuse_their_terminal_lines_after_a_pr_finishes() {
+        let term = RecordingTerm::default();
+        let statuses = PrStatusRows::with_draw_target(
+            [
+                ("example/repo".to_string(), 1),
+                ("example/repo".to_string(), 2),
+            ],
+            ProgressDrawTarget::term_like(Box::new(term.clone())),
+        );
+
+        term.reset();
+        statuses.finish_success("example/repo", 1, "Approved and merged");
+        statuses.update("example/repo", 2, "Approving pull request");
+
+        assert!(
+            !statuses
+                .bars
+                .get(&("example/repo".to_string(), 1))
+                .expect("first status bar")
+                .is_finished(),
+            "completed rows should remain in the status board"
+        );
+        assert_eq!(term.clear_count(), 0, "status rows should not be appended");
+    }
+
+    #[test]
+    fn status_rows_are_disabled_for_verbose_runs() {
+        assert!(!should_render_status_rows(false, true));
+        assert!(!should_render_status_rows(true, false));
+        assert!(should_render_status_rows(false, false));
+    }
 
     #[test]
     fn classifies_required_checks_expected_errors() {
