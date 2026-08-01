@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+## [0.1.1](https://github.com/robjtede/dependabot-reviewer/compare/v0.1.0...v0.1.1) - 2026-08-01
+
+### Added
+
+- Guide first-time setup with GitHub CLI authentication, one-off repository runs, and saved default organizations.
+- Document prebuilt-binary installation with cargo-binstall.
+
 ## [0.1.0](https://github.com/robjtede/dependabot-reviewer/compare/v0.0.0...v0.1.0) - 2026-08-01
 
 ### Added
