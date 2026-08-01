@@ -23,14 +23,14 @@ pub struct App {
 
 impl App {
     pub fn new(mut cli: Cli) -> Result<Self, Report<AppError>> {
-        if cli.org.is_empty() {
+        if cli.org.is_empty() && cli.repo.is_none() {
             let state_path = ReviewState::default_path()?;
             let state = ReviewState::load_from_path(&state_path)?;
             cli.org = state
                 .default_orgs()
                 .ok_or_else(|| Report::new(AppError::InvalidInput))
                 .attach(format!(
-                    "No organizations provided. Use --org or configure [settings].default_orgs in {}.",
+                    "No review target is configured. Use --org <owner> or --repo <owner>/<repository> for this run. To save a default organization, run `dependabot-reviewer --org <owner> --save-default-orgs`. Configuration file: {}.",
                     state_path
                 ))?;
         }
@@ -46,8 +46,8 @@ impl App {
 
             if gh_check.is_ok() && std::io::stdin().is_terminal() {
                 let use_gh = Confirm::with_theme(&ColorfulTheme::default())
-                    .with_prompt("GITHUB_TOKEN not found. Try to use 'gh auth token'?")
-                    .default(false)
+                    .with_prompt("No GitHub token found. Use the token from `gh auth token`?")
+                    .default(true)
                     .interact()
                     .map_err(|_| Report::new(AppError::Interactive))?;
 
@@ -64,7 +64,7 @@ impl App {
             builder = builder.personal_token(token);
         } else if !cli.dry_run {
             return Err(Report::new(AppError::Initialization).attach(
-                "GITHUB_TOKEN is required. Please set it or authenticate with 'gh auth login'.",
+                "GitHub authentication is required. Set GITHUB_TOKEN. Alternatively, install GitHub CLI, run `gh auth login`, then use --use-gh-auth-token.",
             ));
         }
 
@@ -85,7 +85,7 @@ impl App {
 
         if !output.status.success() {
             return Err(Report::new(AppError::Initialization)
-                .attach("'gh auth token' failed. Authenticate with 'gh auth login'."));
+                .attach("`gh auth token` failed. Run `gh auth login`, or set GITHUB_TOKEN."));
         }
 
         let token = String::from_utf8(output.stdout)
@@ -95,7 +95,7 @@ impl App {
 
         if token.is_empty() {
             return Err(Report::new(AppError::Initialization)
-                .attach("'gh auth token' returned an empty token."));
+                .attach("`gh auth token` returned an empty token. Run `gh auth login`, or set GITHUB_TOKEN."));
         }
 
         Ok(token)
@@ -185,5 +185,29 @@ impl App {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::App;
+    use crate::cli::Cli;
+
+    #[tokio::test]
+    async fn accepts_a_repository_without_default_organizations() {
+        let app = App::new(Cli {
+            org: Vec::new(),
+            save_default_orgs: false,
+            repo: Some("owner/repository".to_string()),
+            confirm: false,
+            dry_run: true,
+            allow_non_passing_ci: false,
+            use_gh_auth_token: false,
+            verbose: false,
+            action: None,
+        })
+        .expect("repository target should not require a configured organization");
+
+        assert_eq!(app.cli.repo.as_deref(), Some("owner/repository"));
     }
 }

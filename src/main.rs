@@ -19,6 +19,7 @@ async fn main() -> Result<(), Report<AppError>> {
         }
 
         App::update_default_orgs(cli.org.clone())?;
+        return Ok(());
     }
 
     let app = App::new(cli)?;

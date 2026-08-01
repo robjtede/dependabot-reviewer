@@ -2,8 +2,6 @@
 
 `dependabot-reviewer` reviews Dependabot pull requests across GitHub repositories. It can open unreviewed pull requests, approve and merge updates, or ask Dependabot to rebase or recreate updates.
 
-The program uses `GITHUB_TOKEN`. In an interactive terminal, it can also use the token from `gh auth token`.
-
 ## Install
 
 Install a prebuilt binary with [`cargo-binstall`](https://github.com/cargo-bins/cargo-binstall):
@@ -17,6 +15,34 @@ Or build and install from source:
 ```sh
 cargo install dependabot-reviewer
 ```
+
+## First run
+
+Authenticate with GitHub CLI:
+
+```sh
+gh auth login
+```
+
+Review an organization for this run:
+
+```sh
+dependabot-reviewer --org owner
+```
+
+Or review one repository without saving any configuration:
+
+```sh
+dependabot-reviewer --repo owner/repository
+```
+
+Save an organization as the default for later runs:
+
+```sh
+dependabot-reviewer --org owner --save-default-orgs
+```
+
+Then run `dependabot-reviewer` without `--org`. In non-interactive environments, set `GITHUB_TOKEN` or use `--use-gh-auth-token`.
 
 ## Use
 
