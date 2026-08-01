@@ -38,11 +38,25 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
           GITHUB_TOKEN: ${{ github.token }}
 
+      - name: Install Determinate Nix
+        if: ${{ steps.release-plz.outputs.releases_created == 'true' }}
+        uses: DeterminateSystems/determinate-nix-action@d96678350ffd6a456235832eb11e1c491589b7bb # v3.21.8
+        with:
+          extra-conf: lazy-trees = true
+
+      - name: Set up FlakeHub Cache
+        if: ${{ steps.release-plz.outputs.releases_created == 'true' }}
+        uses: DeterminateSystems/flakehub-cache-action@77c6bddd7d747943530aaa578c57f233ee5d920e # v3.21.8
+
+      - name: Enter Nix devshell
+        if: ${{ steps.release-plz.outputs.releases_created == 'true' }}
+        uses: nicknovitski/nix-develop@9be7cfb4b10451d3390a75dc18ad0465bed4932a # v1.2.1
+
       - name: Comment on release PR
         if: ${{ steps.release-plz.outputs.releases_created == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
-        run: scripts/comment-release-pr '${{ steps.release-plz.outputs.releases }}' '${{ github.sha }}'
+        run: x52-comment-release-pr '${{ steps.release-plz.outputs.releases }}' '${{ github.sha }}'
 
   upload-assets:
     name: Upload release assets
@@ -117,7 +131,18 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Install Determinate Nix
+        uses: DeterminateSystems/determinate-nix-action@d96678350ffd6a456235832eb11e1c491589b7bb # v3.21.8
+        with:
+          extra-conf: lazy-trees = true
+
+      - name: Set up FlakeHub Cache
+        uses: DeterminateSystems/flakehub-cache-action@77c6bddd7d747943530aaa578c57f233ee5d920e # v3.21.8
+
+      - name: Enter Nix devshell
+        uses: nicknovitski/nix-develop@9be7cfb4b10451d3390a75dc18ad0465bed4932a # v1.2.1
+
       - name: Comment on release PR
         env:
           GH_TOKEN: ${{ github.token }}
-        run: scripts/comment-release-assets-uploaded '${{ needs.release.outputs.releases }}' '${{ github.sha }}'
+        run: x52-comment-release-assets-uploaded '${{ needs.release.outputs.releases }}' '${{ github.sha }}'
