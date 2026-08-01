@@ -44,9 +44,9 @@ jobs:
         with:
           extra-conf: lazy-trees = true
 
-      - name: Set up FlakeHub Cache
+      - name: Set up Magic Nix Cache
         if: ${{ steps.release-plz.outputs.releases_created == 'true' }}
-        uses: DeterminateSystems/flakehub-cache-action@77c6bddd7d747943530aaa578c57f233ee5d920e # v3.21.8
+        uses: DeterminateSystems/magic-nix-cache-action@908b263ff629f4cc17666315b7fd3ec127c6244d # v14
 
       - name: Enter Nix devshell
         if: ${{ steps.release-plz.outputs.releases_created == 'true' }}
@@ -136,8 +136,8 @@ jobs:
         with:
           extra-conf: lazy-trees = true
 
-      - name: Set up FlakeHub Cache
-        uses: DeterminateSystems/flakehub-cache-action@77c6bddd7d747943530aaa578c57f233ee5d920e # v3.21.8
+      - name: Set up Magic Nix Cache
+        uses: DeterminateSystems/magic-nix-cache-action@908b263ff629f4cc17666315b7fd3ec127c6244d # v14
 
       - name: Enter Nix devshell
         uses: nicknovitski/nix-develop@9be7cfb4b10451d3390a75dc18ad0465bed4932a # v1.2.1
