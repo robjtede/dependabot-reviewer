@@ -10,7 +10,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Added
 
-- add PR status progress ([#37](https://github.com/robjtede/dependabot-reviewer/pull/37))
+- Show the current action for each pull request while processing it. ([#37](https://github.com/robjtede/dependabot-reviewer/pull/37))
 
 ## [0.1.1](https://github.com/robjtede/dependabot-reviewer/compare/v0.1.0...v0.1.1) - 2026-08-01
 
