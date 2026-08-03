@@ -42,7 +42,9 @@ impl ReviewState {
             .ok_or_else(|| Report::new(AppError::Initialization))
             .attach("Unable to resolve user config directory")?;
         let config_root = Utf8PathBuf::from_path_buf(config_root)
-            .map_err(|_| Report::new(AppError::Initialization))
+            .map_err(|path| {
+                Report::new(AppError::Initialization).attach(path.display().to_string())
+            })
             .attach("User config directory is not valid UTF-8")?;
 
         Ok(config_root.join(APP_CONFIG_DIR).join(STATE_FILE_NAME))

@@ -49,7 +49,7 @@ impl App {
                     .with_prompt("No GitHub token found. Use the token from `gh auth token`?")
                     .default(true)
                     .interact()
-                    .map_err(|_| Report::new(AppError::Interactive))?;
+                    .change_context(AppError::Interactive)?;
 
                 if use_gh {
                     if let Ok(gh_token) = Self::gh_auth_token() {

@@ -8,8 +8,7 @@ categories = ["command-line-utilities", "development-tools"]
 repository = "https://github.com/robjtede/dependabot-reviewer"
 license = "MIT OR Apache-2.0"
 edition = "2021"
-rust-version = "1.88"
-readme = "README.md"
+rust-version = "1.97"
 include = ["Cargo.lock", "Cargo.toml", "LICENSE-APACHE", "LICENSE-MIT", "README.md", "src/**/*"]
 
 [dependencies]
@@ -42,3 +41,56 @@ features = [
   "timeout",
   "tracing",
 ]
+
+[lints.clippy]
+# Prevent panics and placeholder code in the command path.
+string_slice = "warn"
+indexing_slicing = "warn"
+unwrap_used = "warn"
+panic = "warn"
+todo = "warn"
+unimplemented = "warn"
+unreachable = "warn"
+get_unwrap = "warn"
+unwrap_in_result = "warn"
+unchecked_time_subtraction = "warn"
+panic_in_result_fn = "warn"
+
+# Do not silently discard futures or errors.
+let_underscore_future = "warn"
+let_underscore_must_use = "warn"
+unused_result_ok = "warn"
+map_err_ignore = "warn"
+assertions_on_result_states = "warn"
+
+# Avoid common async deadlocks and unexpectedly large futures.
+await_holding_lock = "warn"
+await_holding_refcell_ref = "warn"
+if_let_mutex = "warn"
+large_futures = "warn"
+
+# Keep unsafe code auditable if it is introduced.
+mem_forget = "warn"
+undocumented_unsafe_blocks = "warn"
+multiple_unsafe_ops_per_block = "warn"
+unnecessary_safety_doc = "warn"
+unnecessary_safety_comment = "warn"
+
+# Detect potentially incorrect numeric operations.
+float_cmp = "warn"
+float_cmp_const = "warn"
+lossy_float_literal = "warn"
+cast_sign_loss = "warn"
+invalid_upcast_comparisons = "warn"
+
+# Avoid easily missed correctness and cleanup mistakes.
+rc_mutex = "warn"
+debug_assert_with_mut_call = "warn"
+iter_not_returning_iterator = "warn"
+expl_impl_clone_on_copy = "warn"
+infallible_try_from = "warn"
+dbg_macro = "warn"
+
+# Require a documented reason when suppressing a lint.
+allow_attributes = "warn"
+allow_attributes_without_reason = "warn"

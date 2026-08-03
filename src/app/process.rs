@@ -129,6 +129,7 @@ enum ApproveMergeMode {
     SkipPendingWithoutQueue,
 }
 
+#[derive(Debug)]
 enum EnqueuePullRequestOutcome {
     Queued,
     AwaitingRequiredChecks,
@@ -348,7 +349,11 @@ impl App {
                     3 => PromptChoice::Action(Action::Recreate),
                     4 => PromptChoice::PrintFailingCiPrompt,
                     5 => PromptChoice::Refresh,
-                    _ => unreachable!(),
+                    _ => {
+                        return Err(Report::new(AppError::ActionSelection).attach(format!(
+                            "Action selection {selection} is outside the available options"
+                        )));
+                    }
                 }
             };
 
@@ -1303,7 +1308,10 @@ impl App {
 
         self.debug(&format!("Approving PR #{}", pr_number));
 
-        #[expect(deprecated)] // no alternative yet
+        #[expect(
+            deprecated,
+            reason = "octocrab has no supported alternative for creating an approval review"
+        )]
         let pr_handle = pulls.pull_number(pr_number);
 
         pr_handle
@@ -1340,7 +1348,7 @@ impl App {
                 "Merging PR #{} using {:?} (head: {}, attempt {}/{})",
                 pr_number,
                 merge_method,
-                &head_sha[..8.min(head_sha.len())],
+                head_sha.get(..8).unwrap_or(&head_sha),
                 attempt,
                 MAX_ATTEMPTS
             ));
@@ -1374,7 +1382,10 @@ impl App {
             }
         }
 
-        unreachable!()
+        Err(Report::new(AppError::ApproveMerge).attach(format!(
+            "Merge retry loop ended without merging PR #{} after {} attempts",
+            pr_number, MAX_ATTEMPTS
+        )))
     }
 
     async fn enqueue_pull_request(
@@ -1579,7 +1590,7 @@ needs deeper investigation.",
 #[cfg(test)]
 mod tests {
     use std::{
-        io,
+        assert_matches, io,
         sync::{Arc, Mutex},
     };
 
@@ -1630,17 +1641,29 @@ mod tests {
         }
 
         fn write_line(&self, _: &str) -> io::Result<()> {
-            *self.writes.lock().expect("recording term lock") += 1;
+            let mut writes = self
+                .writes
+                .lock()
+                .map_err(|err| io::Error::other(err.to_string()))?;
+            *writes += 1;
             Ok(())
         }
 
         fn write_str(&self, _: &str) -> io::Result<()> {
-            *self.writes.lock().expect("recording term lock") += 1;
+            let mut writes = self
+                .writes
+                .lock()
+                .map_err(|err| io::Error::other(err.to_string()))?;
+            *writes += 1;
             Ok(())
         }
 
         fn clear_line(&self) -> io::Result<()> {
-            *self.clears.lock().expect("recording term lock") += 1;
+            let mut clears = self
+                .clears
+                .lock()
+                .map_err(|err| io::Error::other(err.to_string()))?;
+            *clears += 1;
             Ok(())
         }
 
@@ -1727,7 +1750,7 @@ mod tests {
 
         let outcome = enqueue_pull_request_outcome(data).expect("expected queued outcome");
 
-        assert!(matches!(outcome, EnqueuePullRequestOutcome::Queued));
+        assert_matches!(outcome, EnqueuePullRequestOutcome::Queued);
     }
 
     #[test]
@@ -1776,7 +1799,6 @@ mod tests {
                 title: title.to_string(),
                 url: format!("https://github.com/example/repo/pull/{}", number),
                 base_ref_name: "main".to_string(),
-                head_sha: "abc123".to_string(),
                 ci_status,
                 dep_update: None,
             },

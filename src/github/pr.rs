@@ -13,8 +13,6 @@ pub struct PrInfo {
     pub title: String,
     pub url: String,
     pub base_ref_name: String,
-    #[allow(dead_code)]
-    pub head_sha: String,
     pub ci_status: CiStatus,
     pub dep_update: Option<DepUpdate>,
 }
@@ -25,18 +23,18 @@ pub fn parse_dep_update(title: &str, head_ref: &str) -> Option<DepUpdate> {
     // "Bump actions/setup-node from 3 to 4"
     let lower = title.to_ascii_lowercase();
     let bump_index = lower.find("bump ")?;
-    let bump_part = &title[bump_index + "bump ".len()..];
-    let bump_part_lower = &lower[bump_index + "bump ".len()..];
+    let bump_part = title.get(bump_index + "bump ".len()..)?;
+    let bump_part_lower = lower.get(bump_index + "bump ".len()..)?;
 
     let from_index = bump_part_lower.find(" from ")?;
-    let dep_name = bump_part[..from_index].trim().to_string();
-    let versions_part = &bump_part[from_index + " from ".len()..];
-    let versions_part_lower = &bump_part_lower[from_index + " from ".len()..];
+    let dep_name = bump_part.get(..from_index)?.trim().to_string();
+    let versions_part = bump_part.get(from_index + " from ".len()..)?;
+    let versions_part_lower = bump_part_lower.get(from_index + " from ".len()..)?;
 
     let to_index = versions_part_lower.find(" to ")?;
-    let from_version = versions_part[..to_index].trim();
-    let to_version_part = &versions_part[to_index + " to ".len()..];
-    let to_version_part_lower = &versions_part_lower[to_index + " to ".len()..];
+    let from_version = versions_part.get(..to_index)?.trim();
+    let to_version_part = versions_part.get(to_index + " to ".len()..)?;
+    let to_version_part_lower = versions_part_lower.get(to_index + " to ".len()..)?;
     let to_version = strip_dependabot_location_suffix(to_version_part, to_version_part_lower)
         .trim()
         .to_string();
@@ -72,7 +70,7 @@ fn infer_dep_type(head_ref: &str) -> &str {
 
 fn strip_dependabot_location_suffix<'a>(to_version: &'a str, to_version_lower: &str) -> &'a str {
     if let Some(path_index) = to_version_lower.find(" in /") {
-        &to_version[..path_index]
+        to_version.get(..path_index).unwrap_or(to_version)
     } else {
         to_version
     }

@@ -103,7 +103,7 @@ impl App {
             self.debug(&format!(
                 "PR #{} head={} ci={}",
                 pr.number,
-                &head_sha[..8.min(head_sha.len())],
+                head_sha.get(..8).unwrap_or(&head_sha),
                 ci_status,
             ));
 
@@ -115,7 +115,6 @@ impl App {
                 title,
                 url: pr.html_url.map(|u| u.to_string()).unwrap_or_default(),
                 base_ref_name: pr.base.ref_field,
-                head_sha,
                 ci_status,
                 dep_update,
             }
