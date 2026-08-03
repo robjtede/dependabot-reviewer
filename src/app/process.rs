@@ -136,48 +136,9 @@ struct GraphqlRequest<'a, T> {
     variables: T,
 }
 
-#[derive(Serialize)]
-struct MergeQueueStatusVariables<'a> {
-    owner: &'a str,
-    repo: &'a str,
-    number: i64,
-    #[serde(rename = "baseBranch")]
-    base_branch: &'a str,
-}
-
-#[derive(Deserialize)]
-struct MergeQueueStatusData {
-    repository: Option<MergeQueueStatusRepository>,
-}
-
-#[derive(Deserialize)]
-struct MergeQueueStatusRepository {
-    #[serde(rename = "mergeQueue")]
-    merge_queue: Option<GraphqlNode>,
-    #[serde(rename = "pullRequest")]
-    pull_request: Option<MergeQueueStatusPullRequest>,
-}
-
-#[derive(Deserialize)]
-struct MergeQueueStatusPullRequest {
-    id: String,
-    #[serde(rename = "headRefOid")]
-    head_ref_oid: String,
-    #[serde(rename = "mergeQueueEntry")]
-    merge_queue_entry: Option<GraphqlNode>,
-    #[serde(rename = "autoMergeRequest")]
-    auto_merge_request: Option<AutoMergeRequest>,
-}
-
 #[derive(Deserialize)]
 struct GraphqlNode {
     id: String,
-}
-
-#[derive(Deserialize)]
-struct AutoMergeRequest {
-    #[serde(rename = "enabledAt")]
-    enabled_at: String,
 }
 
 #[derive(Serialize)]
@@ -1150,73 +1111,9 @@ impl App {
         pr_number: u64,
         base_ref_name: &str,
     ) -> Result<MergeQueueStatus, Report<AppError>> {
-        const QUERY: &str = r#"
-            query MergeQueueStatus($owner: String!, $repo: String!, $number: Int!, $baseBranch: String!) {
-              repository(owner: $owner, name: $repo) {
-                mergeQueue(branch: $baseBranch) { id }
-                pullRequest(number: $number) {
-                  id
-                  headRefOid
-                  mergeQueueEntry { id }
-                  autoMergeRequest { enabledAt }
-                }
-              }
-            }
-        "#;
-
-        let number = i64::try_from(pr_number)
-            .change_context(AppError::GitHubApi)
-            .attach_with(|| format!("PR #{} number is too large for GraphQL", pr_number))?;
-        let payload = GraphqlRequest {
-            query: QUERY,
-            variables: MergeQueueStatusVariables {
-                owner,
-                repo,
-                number,
-                base_branch: base_ref_name,
-            },
-        };
-        let data: MergeQueueStatusData = self
-            .octocrab
-            .graphql(&payload)
+        ApprovalWorkflow::new(&self.octocrab)
+            .inspect(owner, repo, pr_number, base_ref_name)
             .await
-            .change_context(AppError::GitHubApi)
-            .attach(format!(
-                "Failed to query merge queue status for PR #{}",
-                pr_number
-            ))?;
-        let repository = data
-            .repository
-            .ok_or_else(|| Report::new(AppError::GitHubApi))
-            .attach(format!(
-                "Repository missing in GraphQL response for PR #{}",
-                pr_number
-            ))?;
-        let pull_request = repository
-            .pull_request
-            .ok_or_else(|| Report::new(AppError::GitHubApi))
-            .attach(format!(
-                "Pull request missing in GraphQL response for PR #{}",
-                pr_number
-            ))?;
-
-        let _ = repository.merge_queue.as_ref().map(|node| node.id.as_str());
-        let _ = pull_request
-            .merge_queue_entry
-            .as_ref()
-            .map(|node| node.id.as_str());
-        let _ = pull_request
-            .auto_merge_request
-            .as_ref()
-            .map(|request| request.enabled_at.as_str());
-
-        Ok(MergeQueueStatus {
-            pull_request_id: pull_request.id,
-            head_oid: pull_request.head_ref_oid,
-            uses_merge_queue: repository.merge_queue.is_some(),
-            already_queued: pull_request.merge_queue_entry.is_some(),
-            auto_merge_enabled: pull_request.auto_merge_request.is_some(),
-        })
     }
 
     async fn approve_pull_request(
@@ -1393,9 +1290,10 @@ impl App {
             .await
             .change_context(AppError::ApproveMerge)
             .attach("Failed to enable pull request auto-merge")?;
-        let _pull_request = data
+        let _pull_request_id = data
             .enable_pull_request_auto_merge
             .and_then(|payload| payload.pull_request)
+            .map(|pull_request| pull_request.id)
             .ok_or_else(|| Report::new(AppError::ApproveMerge))
             .attach("enablePullRequestAutoMerge did not return a pull request")?;
         Ok(())
@@ -1425,9 +1323,10 @@ fn messages_are_awaiting_required_checks<'a>(messages: impl IntoIterator<Item = 
 fn enqueue_pull_request_outcome(
     data: MutationOnlyResponse,
 ) -> Result<EnqueuePullRequestOutcome, Report<AppError>> {
-    let _merge_queue_entry = data
+    let _merge_queue_entry_id = data
         .enqueue_pull_request
         .and_then(|payload| payload.merge_queue_entry)
+        .map(|entry| entry.id)
         .ok_or_else(|| Report::new(AppError::ApproveMerge))
         .attach("enqueuePullRequest did not return a merge queue entry")?;
 
