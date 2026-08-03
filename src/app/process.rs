@@ -5,6 +5,7 @@ use dialoguer::{theme::ColorfulTheme, Confirm, Select};
 use error_stack::{Report, ResultExt as _};
 use futures_buffered::BufferedStreamExt;
 use futures_util::{FutureExt as _, StreamExt as _};
+use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use octocrab::{models::pulls::ReviewAction, params::pulls::MergeMethod};
 use serde::{Deserialize, Serialize};
 
@@ -32,6 +33,81 @@ struct MergeInfo {
     ci_status: CiStatus,
     dep_update: Option<DepUpdate>,
     previously_reviewed: bool,
+}
+
+struct PrStatusRows {
+    _multi_progress: MultiProgress,
+    bars: HashMap<(String, u64), ProgressBar>,
+}
+
+impl PrStatusRows {
+    fn new(prs: impl IntoIterator<Item = (String, u64)>) -> Option<Self> {
+        if !std::io::stdout().is_terminal() {
+            return None;
+        }
+
+        Some(Self::with_draw_target(prs, ProgressDrawTarget::stdout()))
+    }
+
+    fn with_draw_target(
+        prs: impl IntoIterator<Item = (String, u64)>,
+        draw_target: ProgressDrawTarget,
+    ) -> Self {
+        let multi_progress = MultiProgress::with_draw_target(draw_target);
+        multi_progress.set_move_cursor(true);
+        let style = ProgressStyle::with_template("  {spinner:.dim} {msg}")
+            .expect("progress status template is valid");
+        let mut bars = HashMap::new();
+
+        for (repo, pr_number) in prs {
+            let bar = multi_progress.add(ProgressBar::new_spinner());
+            bar.set_style(style.clone());
+            bar.enable_steady_tick(Duration::from_millis(120));
+            bar.set_message(Self::message(&repo, pr_number, "Waiting to process"));
+            bars.insert((repo, pr_number), bar);
+        }
+
+        Self {
+            _multi_progress: multi_progress,
+            bars,
+        }
+    }
+
+    fn update(&self, repo: &str, pr_number: u64, status: &str) {
+        if let Some(bar) = self.bars.get(&(repo.to_owned(), pr_number)) {
+            bar.set_message(Self::message(repo, pr_number, status));
+        }
+    }
+
+    fn finish_success(&self, repo: &str, pr_number: u64, status: &str) {
+        self.complete(repo, pr_number, &format!("✓ {status}"));
+    }
+
+    fn finish_skipped(&self, repo: &str, pr_number: u64, status: &str) {
+        self.complete(repo, pr_number, &format!("⊘ {status}"));
+    }
+
+    fn complete(&self, repo: &str, pr_number: u64, status: &str) {
+        if let Some(bar) = self.bars.get(&(repo.to_owned(), pr_number)) {
+            bar.disable_steady_tick();
+            bar.set_style(
+                ProgressStyle::with_template("  {msg}")
+                    .expect("completed status template is valid"),
+            );
+            bar.set_message(Self::message(repo, pr_number, status));
+        }
+    }
+
+    fn finish(&self) {
+        for bar in self.bars.values() {
+            bar.finish();
+        }
+        println!();
+    }
+
+    fn message(repo: &str, pr_number: u64, status: &str) -> String {
+        format!("{repo}#{pr_number}: {status}")
+    }
 }
 
 struct MergeQueueStatus {
@@ -62,6 +138,10 @@ enum PromptChoice {
     Refresh,
     PrintFailingCiPrompt,
     Action(Action),
+}
+
+fn should_render_status_rows(dry_run: bool, verbose: bool) -> bool {
+    !dry_run && !verbose
 }
 
 #[derive(Serialize)]
@@ -337,6 +417,16 @@ impl App {
             let mut comment_tasks = Vec::new();
             let mut merge_infos: Vec<MergeInfo> = Vec::new();
             let mut state_changed = false;
+            let mut pr_statuses = (should_render_status_rows(self.cli.dry_run, self.cli.verbose)
+                && !matches!(action, Action::ApproveMerge))
+            .then(|| {
+                PrStatusRows::new(
+                    review_items
+                        .iter()
+                        .map(|item| (item.repo.clone(), item.pr.number)),
+                )
+            })
+            .flatten();
 
             for item in &review_items {
                 let previously_reviewed = item
@@ -534,24 +624,46 @@ impl App {
                     match action {
                         Action::OpenUnreviewedInBrowser => {
                             if previously_reviewed {
+                                if let Some(statuses) = &pr_statuses {
+                                    statuses.finish_skipped(
+                                        &item.repo,
+                                        pr_number,
+                                        "Already reviewed",
+                                    );
+                                }
                                 continue;
                             }
-                            println!(
-                                "  {} Running `open {}`",
-                                style("•").dim(),
-                                style(&item.pr.url).dim()
-                            );
+                            if let Some(statuses) = &pr_statuses {
+                                statuses.update(&item.repo, pr_number, "Opening in browser");
+                            } else {
+                                println!(
+                                    "  {} Running `open {}`",
+                                    style("•").dim(),
+                                    style(&item.pr.url).dim()
+                                );
+                            }
                             open_in_browser(&item.pr.url)?;
-                            println!(
-                                "  {} Opened PR #{}{}",
-                                style("✓").green(),
-                                pr_number,
-                                style(format!(" ({})", item.repo)).dim()
-                            );
+                            if let Some(statuses) = &pr_statuses {
+                                statuses.finish_success(&item.repo, pr_number, "Opened in browser");
+                            } else {
+                                println!(
+                                    "  {} Opened PR #{}{}",
+                                    style("✓").green(),
+                                    pr_number,
+                                    style(format!(" ({})", item.repo)).dim()
+                                );
+                            }
                             performed_action = Some(action);
                             opened_in_browser_in_session = true;
                         }
                         Action::Rebase => {
+                            if let Some(statuses) = &pr_statuses {
+                                statuses.update(
+                                    &item.repo,
+                                    pr_number,
+                                    "Requesting Dependabot rebase",
+                                );
+                            }
                             let owner = item.owner.clone();
                             let repo_name = item.repo_name.clone();
                             let repo = item.repo.clone();
@@ -575,6 +687,13 @@ impl App {
                             );
                         }
                         Action::Recreate => {
+                            if let Some(statuses) = &pr_statuses {
+                                statuses.update(
+                                    &item.repo,
+                                    pr_number,
+                                    "Requesting Dependabot recreation",
+                                );
+                            }
                             let owner = item.owner.clone();
                             let repo_name = item.repo_name.clone();
                             let repo = item.repo.clone();
@@ -611,13 +730,21 @@ impl App {
                                     previously_reviewed,
                                 });
                             } else {
-                                println!(
-                                    "  {} Skipping PR #{} (CI {}){}",
-                                    style("⊘").yellow(),
-                                    pr_number,
-                                    item.pr.ci_status,
-                                    style(format!(" ({})", item.repo)).dim()
-                                );
+                                if let Some(statuses) = &pr_statuses {
+                                    statuses.finish_skipped(
+                                        &item.repo,
+                                        pr_number,
+                                        &format!("Skipped: CI {}", item.pr.ci_status),
+                                    );
+                                } else {
+                                    println!(
+                                        "  {} Skipping PR #{} (CI {}){}",
+                                        style("⊘").yellow(),
+                                        pr_number,
+                                        item.pr.ci_status,
+                                        style(format!(" ({})", item.repo)).dim()
+                                    );
+                                }
                             }
                         }
                     }
@@ -629,12 +756,16 @@ impl App {
 
                 while let Some(result) = stream.next().await {
                     let (pr_number, repo) = result?;
-                    println!(
-                        "  {} Commented on PR #{}{}",
-                        style("✓").green(),
-                        pr_number,
-                        style(format!(" ({})", repo)).dim()
-                    );
+                    if let Some(statuses) = &pr_statuses {
+                        statuses.finish_success(&repo, pr_number, "Dependabot request sent");
+                    } else {
+                        println!(
+                            "  {} Commented on PR #{}{}",
+                            style("✓").green(),
+                            pr_number,
+                            style(format!(" ({})", repo)).dim()
+                        );
+                    }
                     performed_action = Some(action);
                 }
             }
@@ -662,20 +793,42 @@ impl App {
 
                     if open_urls {
                         for info in &non_previously_reviewed {
-                            println!(
-                                "  {} Running `open {}`",
-                                style("•").dim(),
-                                style(&info.url).dim()
-                            );
+                            if let Some(statuses) = &pr_statuses {
+                                statuses.update(
+                                    &info.repo,
+                                    info.pr_number,
+                                    "Opening in browser before approval",
+                                );
+                            } else {
+                                println!(
+                                    "  {} Running `open {}`",
+                                    style("•").dim(),
+                                    style(&info.url).dim()
+                                );
+                            }
                             open_in_browser(&info.url)?;
+                            if let Some(statuses) = &pr_statuses {
+                                statuses.update(&info.repo, info.pr_number, "Waiting for approval");
+                            }
                         }
                     }
+                }
+
+                if !self.cli.verbose && pr_statuses.is_none() {
+                    pr_statuses = PrStatusRows::new(
+                        merge_infos
+                            .iter()
+                            .map(|info| (info.repo.clone(), info.pr_number)),
+                    );
                 }
 
                 // Merges must run sequentially: each merge modifies the base branch,
                 // which invalidates the head SHA of subsequent PRs. Running them in
                 // parallel causes "Base branch was modified" errors.
                 for info in &merge_infos {
+                    if let Some(statuses) = &pr_statuses {
+                        statuses.update(&info.repo, info.pr_number, "Inspecting merge strategy");
+                    }
                     let (merge_method, allow_auto_merge) = approve_merge_context
                         .as_ref()
                         .and_then(|contexts| contexts.get(&info.repo))
@@ -707,6 +860,9 @@ impl App {
                         || matches!(merge_mode, ApproveMergeMode::AlreadyAutoMergeEnabled)
                             && queue_status.uses_merge_queue)
                     {
+                        if let Some(statuses) = &pr_statuses {
+                            statuses.update(&info.repo, info.pr_number, "Approving pull request");
+                        }
                         self.approve_pull_request(&info.owner, &info.repo_name, info.pr_number)
                             .await?;
                     }
@@ -714,6 +870,9 @@ impl App {
                     match merge_mode {
                         ApproveMergeMode::Direct => {
                             self.debug(&format!("PR #{} merge queue: not used", info.pr_number));
+                            if let Some(statuses) = &pr_statuses {
+                                statuses.update(&info.repo, info.pr_number, "Merging");
+                            }
                             self.direct_merge_pull_request(
                                 &info.owner,
                                 &info.repo_name,
@@ -721,12 +880,20 @@ impl App {
                                 merge_method,
                             )
                             .await?;
-                            println!(
-                                "  {} Approved and merged PR #{}{}",
-                                style("✓").green(),
-                                info.pr_number,
-                                style(format!(" ({})", info.repo)).dim()
-                            );
+                            if let Some(statuses) = &pr_statuses {
+                                statuses.finish_success(
+                                    &info.repo,
+                                    info.pr_number,
+                                    "Approved and merged",
+                                );
+                            } else {
+                                println!(
+                                    "  {} Approved and merged PR #{}{}",
+                                    style("✓").green(),
+                                    info.pr_number,
+                                    style(format!(" ({})", info.repo)).dim()
+                                );
+                            }
                         }
                         ApproveMergeMode::AutoMerge => {
                             self.debug(&format!(
@@ -739,12 +906,20 @@ impl App {
                                 merge_method,
                             )
                             .await?;
-                            println!(
-                                "  {} Approved PR #{} and enabled auto-merge{}",
-                                style("✓").green(),
-                                info.pr_number,
-                                style(format!(" ({})", info.repo)).dim()
-                            );
+                            if let Some(statuses) = &pr_statuses {
+                                statuses.finish_success(
+                                    &info.repo,
+                                    info.pr_number,
+                                    "Approved; auto-merge enabled",
+                                );
+                            } else {
+                                println!(
+                                    "  {} Approved PR #{} and enabled auto-merge{}",
+                                    style("✓").green(),
+                                    info.pr_number,
+                                    style(format!(" ({})", info.repo)).dim()
+                                );
+                            }
                         }
                         ApproveMergeMode::MergeQueueEnqueue => {
                             self.debug(&format!(
@@ -759,12 +934,20 @@ impl App {
                                 .await?
                             {
                                 EnqueuePullRequestOutcome::Queued => {
-                                    println!(
-                                        "  {} Approved PR #{} and added it to the merge queue{}",
-                                        style("✓").green(),
-                                        info.pr_number,
-                                        style(format!(" ({})", info.repo)).dim()
-                                    );
+                                    if let Some(statuses) = &pr_statuses {
+                                        statuses.finish_success(
+                                            &info.repo,
+                                            info.pr_number,
+                                            "Approved; added to merge queue",
+                                        );
+                                    } else {
+                                        println!(
+                                            "  {} Approved PR #{} and added it to the merge queue{}",
+                                            style("✓").green(),
+                                            info.pr_number,
+                                            style(format!(" ({})", info.repo)).dim()
+                                        );
+                                    }
                                 }
                                 EnqueuePullRequestOutcome::AwaitingRequiredChecks => {
                                     self.debug(&format!(
@@ -777,12 +960,20 @@ impl App {
                                         merge_method,
                                     )
                                     .await?;
-                                    println!(
-                                        "  {} Approved PR #{} and enabled auto-merge while required checks complete{}",
-                                        style("✓").green(),
-                                        info.pr_number,
-                                        style(format!(" ({})", info.repo)).dim()
-                                    );
+                                    if let Some(statuses) = &pr_statuses {
+                                        statuses.finish_success(
+                                            &info.repo,
+                                            info.pr_number,
+                                            "Approved; auto-merge enabled while checks complete",
+                                        );
+                                    } else {
+                                        println!(
+                                            "  {} Approved PR #{} and enabled auto-merge while required checks complete{}",
+                                            style("✓").green(),
+                                            info.pr_number,
+                                            style(format!(" ({})", info.repo)).dim()
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -797,24 +988,40 @@ impl App {
                                 merge_method,
                             )
                             .await?;
-                            println!(
-                                "  {} Approved PR #{} and enabled auto-merge for the merge queue{}",
-                                style("✓").green(),
-                                info.pr_number,
-                                style(format!(" ({})", info.repo)).dim()
-                            );
+                            if let Some(statuses) = &pr_statuses {
+                                statuses.finish_success(
+                                    &info.repo,
+                                    info.pr_number,
+                                    "Approved; merge-queue auto-merge enabled",
+                                );
+                            } else {
+                                println!(
+                                    "  {} Approved PR #{} and enabled auto-merge for the merge queue{}",
+                                    style("✓").green(),
+                                    info.pr_number,
+                                    style(format!(" ({})", info.repo)).dim()
+                                );
+                            }
                         }
                         ApproveMergeMode::AlreadyQueued => {
                             self.debug(&format!(
                                 "PR #{} merge queue: already queued",
                                 info.pr_number
                             ));
-                            println!(
-                                "  {} Approved PR #{} (already in merge queue){}",
-                                style("✓").green(),
-                                info.pr_number,
-                                style(format!(" ({})", info.repo)).dim()
-                            );
+                            if let Some(statuses) = &pr_statuses {
+                                statuses.finish_success(
+                                    &info.repo,
+                                    info.pr_number,
+                                    "Already in merge queue",
+                                );
+                            } else {
+                                println!(
+                                    "  {} Approved PR #{} (already in merge queue){}",
+                                    style("✓").green(),
+                                    info.pr_number,
+                                    style(format!(" ({})", info.repo)).dim()
+                                );
+                            }
                         }
                         ApproveMergeMode::AlreadyAutoMergeEnabled => {
                             if queue_status.uses_merge_queue {
@@ -822,34 +1029,58 @@ impl App {
                                     "PR #{} auto-merge: already enabled for merge queue",
                                     info.pr_number
                                 ));
-                                println!(
-                                    "  {} Approved PR #{} (auto-merge already enabled){}",
-                                    style("✓").green(),
-                                    info.pr_number,
-                                    style(format!(" ({})", info.repo)).dim()
-                                );
+                                if let Some(statuses) = &pr_statuses {
+                                    statuses.finish_success(
+                                        &info.repo,
+                                        info.pr_number,
+                                        "Auto-merge already enabled",
+                                    );
+                                } else {
+                                    println!(
+                                        "  {} Approved PR #{} (auto-merge already enabled){}",
+                                        style("✓").green(),
+                                        info.pr_number,
+                                        style(format!(" ({})", info.repo)).dim()
+                                    );
+                                }
                             } else {
                                 self.debug(&format!(
                                     "PR #{} auto-merge: already enabled (approval refreshed)",
                                     info.pr_number
                                 ));
-                                println!(
-                                    "  {} Approved PR #{} (auto-merge already enabled; approval refreshed){}",
-                                    style("✓").green(),
-                                    info.pr_number,
-                                    style(format!(" ({})", info.repo)).dim()
-                                );
+                                if let Some(statuses) = &pr_statuses {
+                                    statuses.finish_success(
+                                        &info.repo,
+                                        info.pr_number,
+                                        "Auto-merge already enabled; approval refreshed",
+                                    );
+                                } else {
+                                    println!(
+                                        "  {} Approved PR #{} (auto-merge already enabled; approval refreshed){}",
+                                        style("✓").green(),
+                                        info.pr_number,
+                                        style(format!(" ({})", info.repo)).dim()
+                                    );
+                                }
                             }
                         }
                         ApproveMergeMode::SkipPendingWithoutQueue => {
                             self.debug(&format!("PR #{} merge queue: not used", info.pr_number));
-                            println!(
-                                "  {} Skipping PR #{} (CI {}, no merge queue){}",
-                                style("⊘").yellow(),
-                                info.pr_number,
-                                info.ci_status,
-                                style(format!(" ({})", info.repo)).dim()
-                            );
+                            if let Some(statuses) = &pr_statuses {
+                                statuses.finish_skipped(
+                                    &info.repo,
+                                    info.pr_number,
+                                    &format!("Skipped: CI {}, no merge queue", info.ci_status),
+                                );
+                            } else {
+                                println!(
+                                    "  {} Skipping PR #{} (CI {}, no merge queue){}",
+                                    style("⊘").yellow(),
+                                    info.pr_number,
+                                    info.ci_status,
+                                    style(format!(" ({})", info.repo)).dim()
+                                );
+                            }
                             continue;
                         }
                     }
@@ -861,6 +1092,10 @@ impl App {
 
                     performed_action = Some(action);
                 }
+            }
+
+            if let Some(statuses) = pr_statuses.take() {
+                statuses.finish();
             }
 
             if state_changed {
@@ -1343,7 +1578,134 @@ needs deeper investigation.",
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        io,
+        sync::{Arc, Mutex},
+    };
+
+    use indicatif::TermLike;
+
     use super::*;
+
+    #[derive(Clone, Debug, Default)]
+    struct RecordingTerm {
+        clears: Arc<Mutex<usize>>,
+        writes: Arc<Mutex<usize>>,
+    }
+
+    impl RecordingTerm {
+        fn clear_count(&self) -> usize {
+            *self.clears.lock().expect("recording term lock")
+        }
+
+        fn reset(&self) {
+            *self.clears.lock().expect("recording term lock") = 0;
+            *self.writes.lock().expect("recording term lock") = 0;
+        }
+
+        fn write_count(&self) -> usize {
+            *self.writes.lock().expect("recording term lock")
+        }
+    }
+
+    impl TermLike for RecordingTerm {
+        fn width(&self) -> u16 {
+            120
+        }
+
+        fn move_cursor_up(&self, _: usize) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn move_cursor_down(&self, _: usize) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn move_cursor_right(&self, _: usize) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn move_cursor_left(&self, _: usize) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn write_line(&self, _: &str) -> io::Result<()> {
+            *self.writes.lock().expect("recording term lock") += 1;
+            Ok(())
+        }
+
+        fn write_str(&self, _: &str) -> io::Result<()> {
+            *self.writes.lock().expect("recording term lock") += 1;
+            Ok(())
+        }
+
+        fn clear_line(&self) -> io::Result<()> {
+            *self.clears.lock().expect("recording term lock") += 1;
+            Ok(())
+        }
+
+        fn flush(&self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn status_rows_reuse_their_terminal_lines_after_a_pr_finishes() {
+        let term = RecordingTerm::default();
+        let statuses = PrStatusRows::with_draw_target(
+            [
+                ("example/repo".to_string(), 1),
+                ("example/repo".to_string(), 2),
+            ],
+            ProgressDrawTarget::term_like(Box::new(term.clone())),
+        );
+
+        term.reset();
+        statuses.finish_success("example/repo", 1, "Approved and merged");
+        statuses.update("example/repo", 2, "Approving pull request");
+
+        assert!(
+            !statuses
+                .bars
+                .get(&("example/repo".to_string(), 1))
+                .expect("first status bar")
+                .is_finished(),
+            "completed rows should remain in the status board"
+        );
+        assert_eq!(term.clear_count(), 0, "status rows should not be appended");
+    }
+
+    #[test]
+    fn status_rows_do_not_redraw_after_processing_finishes() {
+        let term = RecordingTerm::default();
+        let statuses = PrStatusRows::with_draw_target(
+            [
+                ("example/repo".to_string(), 1),
+                ("example/repo".to_string(), 2),
+            ],
+            ProgressDrawTarget::term_like(Box::new(term.clone())),
+        );
+
+        statuses.finish_success("example/repo", 1, "Approved and merged");
+        statuses.finish_success("example/repo", 2, "Approved and merged");
+        term.reset();
+        statuses.finish();
+        let writes_before_drop = term.write_count();
+        drop(statuses);
+
+        assert_eq!(
+            term.write_count(),
+            writes_before_drop,
+            "dropping status rows must not redraw over the final application output"
+        );
+    }
+
+    #[test]
+    fn status_rows_are_disabled_for_verbose_runs() {
+        assert!(!should_render_status_rows(false, true));
+        assert!(!should_render_status_rows(true, false));
+        assert!(should_render_status_rows(false, false));
+    }
 
     #[test]
     fn classifies_required_checks_expected_errors() {
