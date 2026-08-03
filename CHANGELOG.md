@@ -12,11 +12,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 - add PR status progress ([#37](https://github.com/robjtede/dependabot-reviewer/pull/37))
 
-### Other
-
-- update error-stack dep
-- update octocrab dep
-
 ## [0.1.1](https://github.com/robjtede/dependabot-reviewer/compare/v0.1.0...v0.1.1) - 2026-08-01
 
 ### Added
