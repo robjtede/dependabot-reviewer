@@ -9,7 +9,11 @@ use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use octocrab::{models::pulls::ReviewAction, params::pulls::MergeMethod};
 use serde::{Deserialize, Serialize};
 
-use super::{state::ReviewState, App};
+use super::{
+    approval_workflow::{ApprovalMode, ApprovalWorkflow, MergeQueueStatus},
+    state::ReviewState,
+    App,
+};
 use crate::{
     cli::Action,
     error::AppError,
@@ -108,25 +112,6 @@ impl PrStatusRows {
     fn message(repo: &str, pr_number: u64, status: &str) -> String {
         format!("{repo}#{pr_number}: {status}")
     }
-}
-
-struct MergeQueueStatus {
-    pull_request_id: String,
-    head_oid: String,
-    uses_merge_queue: bool,
-    already_queued: bool,
-    auto_merge_enabled: bool,
-}
-
-#[derive(Debug)]
-enum ApproveMergeMode {
-    Direct,
-    AutoMerge,
-    MergeQueueEnqueue,
-    MergeQueueAutoMerge,
-    AlreadyQueued,
-    AlreadyAutoMergeEnabled,
-    SkipPendingWithoutQueue,
 }
 
 #[derive(Debug)]
@@ -479,8 +464,7 @@ impl App {
                                     &item.pr.base_ref_name,
                                 )
                                 .await?;
-                            let merge_mode = self.choose_approve_merge_mode(
-                                item.pr.number,
+                            let merge_mode = ApprovalWorkflow::plan(
                                 item.pr.ci_status,
                                 &queue_status,
                                 allow_auto_merge,
@@ -493,7 +477,7 @@ impl App {
                                 ""
                             };
                             match merge_mode {
-                                ApproveMergeMode::Direct => {
+                                ApprovalMode::Direct => {
                                     self.debug(&format!(
                                         "PR #{} merge queue: not used",
                                         item.pr.number
@@ -521,7 +505,7 @@ impl App {
                                         );
                                     }
                                 }
-                                ApproveMergeMode::AutoMerge => {
+                                ApprovalMode::AutoMerge => {
                                     self.debug(&format!(
                                         "PR #{} merge queue: not used (enable regular auto-merge)",
                                         item.pr.number
@@ -534,7 +518,7 @@ impl App {
                                         item.pr.url
                                     );
                                 }
-                                ApproveMergeMode::MergeQueueEnqueue => {
+                                ApprovalMode::MergeQueueEnqueue => {
                                     self.debug(&format!(
                                         "PR #{} merge queue: used (enqueue)",
                                         item.pr.number
@@ -547,7 +531,7 @@ impl App {
                                         item.pr.url
                                     );
                                 }
-                                ApproveMergeMode::MergeQueueAutoMerge => {
+                                ApprovalMode::MergeQueueAutoMerge => {
                                     self.debug(&format!(
                                         "PR #{} merge queue: used (auto-merge until queueable)",
                                         item.pr.number
@@ -572,7 +556,7 @@ impl App {
                                         );
                                     }
                                 }
-                                ApproveMergeMode::AlreadyQueued => {
+                                ApprovalMode::AlreadyQueued => {
                                     self.debug(&format!(
                                         "PR #{} merge queue: already queued",
                                         item.pr.number
@@ -585,7 +569,7 @@ impl App {
                                         item.pr.url
                                     );
                                 }
-                                ApproveMergeMode::AlreadyAutoMergeEnabled => {
+                                ApprovalMode::AlreadyAutoMergeEnabled => {
                                     self.debug(&format!(
                                         "PR #{} auto-merge: already enabled",
                                         item.pr.number
@@ -598,7 +582,7 @@ impl App {
                                         item.pr.url
                                     );
                                 }
-                                ApproveMergeMode::SkipPendingWithoutQueue => {
+                                ApprovalMode::SkipPendingWithoutQueue => {
                                     self.debug(&format!(
                                         "PR #{} merge queue: not used",
                                         item.pr.number
@@ -853,16 +837,15 @@ impl App {
                             info.pr_number
                         ))?;
 
-                    let merge_mode = self.choose_approve_merge_mode(
-                        info.pr_number,
+                    let merge_mode = ApprovalWorkflow::plan(
                         info.ci_status,
                         &queue_status,
                         allow_auto_merge,
                         allow_non_passing_ci,
                     );
 
-                    if !(matches!(merge_mode, ApproveMergeMode::AlreadyQueued)
-                        || matches!(merge_mode, ApproveMergeMode::AlreadyAutoMergeEnabled)
+                    if !(matches!(merge_mode, ApprovalMode::AlreadyQueued)
+                        || matches!(merge_mode, ApprovalMode::AlreadyAutoMergeEnabled)
                             && queue_status.uses_merge_queue)
                     {
                         if let Some(statuses) = &pr_statuses {
@@ -873,7 +856,7 @@ impl App {
                     }
 
                     match merge_mode {
-                        ApproveMergeMode::Direct => {
+                        ApprovalMode::Direct => {
                             self.debug(&format!("PR #{} merge queue: not used", info.pr_number));
                             if let Some(statuses) = &pr_statuses {
                                 statuses.update(&info.repo, info.pr_number, "Merging");
@@ -900,7 +883,7 @@ impl App {
                                 );
                             }
                         }
-                        ApproveMergeMode::AutoMerge => {
+                        ApprovalMode::AutoMerge => {
                             self.debug(&format!(
                                 "PR #{} merge queue: not used (enable regular auto-merge)",
                                 info.pr_number
@@ -926,7 +909,7 @@ impl App {
                                 );
                             }
                         }
-                        ApproveMergeMode::MergeQueueEnqueue => {
+                        ApprovalMode::MergeQueueEnqueue => {
                             self.debug(&format!(
                                 "PR #{} merge queue: used (enqueue)",
                                 info.pr_number
@@ -982,7 +965,7 @@ impl App {
                                 }
                             }
                         }
-                        ApproveMergeMode::MergeQueueAutoMerge => {
+                        ApprovalMode::MergeQueueAutoMerge => {
                             self.debug(&format!(
                                 "PR #{} merge queue: used (auto-merge until queueable)",
                                 info.pr_number
@@ -1008,7 +991,7 @@ impl App {
                                 );
                             }
                         }
-                        ApproveMergeMode::AlreadyQueued => {
+                        ApprovalMode::AlreadyQueued => {
                             self.debug(&format!(
                                 "PR #{} merge queue: already queued",
                                 info.pr_number
@@ -1028,7 +1011,7 @@ impl App {
                                 );
                             }
                         }
-                        ApproveMergeMode::AlreadyAutoMergeEnabled => {
+                        ApprovalMode::AlreadyAutoMergeEnabled => {
                             if queue_status.uses_merge_queue {
                                 self.debug(&format!(
                                     "PR #{} auto-merge: already enabled for merge queue",
@@ -1069,7 +1052,7 @@ impl App {
                                 }
                             }
                         }
-                        ApproveMergeMode::SkipPendingWithoutQueue => {
+                        ApprovalMode::SkipPendingWithoutQueue => {
                             self.debug(&format!("PR #{} merge queue: not used", info.pr_number));
                             if let Some(statuses) = &pr_statuses {
                                 statuses.finish_skipped(
@@ -1234,62 +1217,6 @@ impl App {
             already_queued: pull_request.merge_queue_entry.is_some(),
             auto_merge_enabled: pull_request.auto_merge_request.is_some(),
         })
-    }
-
-    fn choose_approve_merge_mode(
-        &self,
-        pr_number: u64,
-        ci_status: CiStatus,
-        queue_status: &MergeQueueStatus,
-        allow_auto_merge: bool,
-        allow_non_passing_ci: bool,
-    ) -> ApproveMergeMode {
-        if queue_status.auto_merge_enabled {
-            return ApproveMergeMode::AlreadyAutoMergeEnabled;
-        }
-
-        if queue_status.uses_merge_queue {
-            if queue_status.already_queued {
-                return ApproveMergeMode::AlreadyQueued;
-            }
-
-            return match ci_status {
-                CiStatus::Passing | CiStatus::Unknown => ApproveMergeMode::MergeQueueEnqueue,
-                CiStatus::Pending | CiStatus::Failing => {
-                    if allow_non_passing_ci {
-                        ApproveMergeMode::MergeQueueAutoMerge
-                    } else {
-                        ApproveMergeMode::SkipPendingWithoutQueue
-                    }
-                }
-            };
-        }
-
-        match ci_status {
-            CiStatus::Passing | CiStatus::Unknown => ApproveMergeMode::Direct,
-            CiStatus::Pending if allow_non_passing_ci => {
-                self.debug(&format!(
-                    "PR #{} merge queue: not used (attempt direct merge despite CI pending)",
-                    pr_number
-                ));
-                ApproveMergeMode::Direct
-            }
-            CiStatus::Failing if allow_non_passing_ci => {
-                self.debug(&format!(
-                    "PR #{} merge queue: not used (attempt direct merge despite CI failing)",
-                    pr_number
-                ));
-                ApproveMergeMode::Direct
-            }
-            CiStatus::Pending if allow_auto_merge => {
-                self.debug(&format!(
-                    "PR #{} merge queue: not used (enable regular auto-merge)",
-                    pr_number
-                ));
-                ApproveMergeMode::AutoMerge
-            }
-            CiStatus::Pending | CiStatus::Failing => ApproveMergeMode::SkipPendingWithoutQueue,
-        }
     }
 
     async fn approve_pull_request(

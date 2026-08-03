@@ -1,3 +1,4 @@
+mod approval_workflow;
 mod fetch;
 mod interactive;
 mod process;
