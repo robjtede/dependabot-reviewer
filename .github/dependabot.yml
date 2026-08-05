@@ -8,4 +8,8 @@ updates:
     directory: /
     schedule:
       interval: weekly
-    versioning-strategy: increase-if-necessary
+    versioning-strategy: lockfile-only
+  - package-ecosystem: nix
+    directory: /
+    schedule:
+      interval: monthly
