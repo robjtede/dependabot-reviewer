@@ -1,4 +1,10 @@
-use std::{collections::HashMap, io::IsTerminal as _, process::Command, time::Duration};
+use std::{
+    collections::{BTreeSet, HashMap},
+    io::IsTerminal as _,
+    process::Command,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use console::style;
 use dialoguer::{theme::ColorfulTheme, Confirm, Select};
@@ -42,6 +48,84 @@ struct MergeInfo {
 struct PrStatusRows {
     _multi_progress: MultiProgress,
     bars: HashMap<(String, u64), ProgressBar>,
+}
+
+struct PrLoadingSpinner {
+    _multi_progress: MultiProgress,
+    state: PrLoadingState,
+}
+
+#[derive(Clone)]
+struct PrLoadingState {
+    spinner: ProgressBar,
+    active_repos: Arc<Mutex<BTreeSet<String>>>,
+}
+
+impl PrLoadingSpinner {
+    fn new(verbose: bool) -> Option<Self> {
+        if !should_render_loading_spinner(verbose) || !std::io::stdout().is_terminal() {
+            return None;
+        }
+
+        Some(Self::with_draw_target(ProgressDrawTarget::stdout()))
+    }
+
+    fn with_draw_target(draw_target: ProgressDrawTarget) -> Self {
+        let multi_progress = MultiProgress::with_draw_target(draw_target);
+        let spinner = multi_progress.add(ProgressBar::new_spinner());
+        spinner.set_style(
+            ProgressStyle::with_template("  {spinner:.dim} {msg}")
+                .expect("loading spinner template is valid"),
+        );
+        spinner.enable_steady_tick(Duration::from_millis(120));
+
+        Self {
+            _multi_progress: multi_progress,
+            state: PrLoadingState {
+                spinner,
+                active_repos: Arc::new(Mutex::new(BTreeSet::new())),
+            },
+        }
+    }
+
+    fn state(&self) -> PrLoadingState {
+        self.state.clone()
+    }
+
+    fn finish(&self) {
+        self.state.spinner.finish_and_clear();
+    }
+}
+
+impl PrLoadingState {
+    fn start(&self, repo: &str) {
+        let mut active_repos = self.active_repos.lock().expect("loading spinner lock");
+        active_repos.insert(repo.to_owned());
+        self.spinner.set_message(Self::message(&active_repos));
+    }
+
+    fn finish(&self, repo: &str) {
+        let mut active_repos = self.active_repos.lock().expect("loading spinner lock");
+        active_repos.remove(repo);
+        self.spinner.set_message(Self::message(&active_repos));
+    }
+
+    fn message(active_repos: &BTreeSet<String>) -> String {
+        if active_repos.is_empty() {
+            "Loading PRs".to_owned()
+        } else {
+            format!(
+                "Loading PRs for {}",
+                active_repos.iter().cloned().collect::<Vec<_>>().join(", ")
+            )
+        }
+    }
+}
+
+impl Drop for PrLoadingSpinner {
+    fn drop(&mut self) {
+        self.finish();
+    }
 }
 
 impl PrStatusRows {
@@ -130,6 +214,12 @@ fn should_render_status_rows(dry_run: bool, verbose: bool) -> bool {
     !dry_run && !verbose
 }
 
+fn should_render_loading_spinner(verbose: bool) -> bool {
+    !verbose
+}
+
+const MAX_CONCURRENT_REPO_FETCHES: usize = 2;
+
 #[derive(Serialize)]
 struct GraphqlRequest<'a, T> {
     query: &'a str,
@@ -193,21 +283,54 @@ impl App {
         loop {
             println!("Fetching PR details for {} repositories", repos.len());
 
-            let mut review_items = Vec::new();
-            for repo in repos {
-                let (owner, repo_name) = repo
-                    .split_once('/')
-                    .ok_or_else(|| Report::new(AppError::InvalidInput))
-                    .attach_with(|| format!("Invalid repo format: {}", repo))?;
+            let loading_spinner = PrLoadingSpinner::new(self.cli.verbose);
+            let loading_state = loading_spinner.as_ref().map(PrLoadingSpinner::state);
+            let repo_targets = repos
+                .iter()
+                .map(|repo| {
+                    let (owner, repo_name) = repo
+                        .split_once('/')
+                        .ok_or_else(|| Report::new(AppError::InvalidInput))
+                        .attach_with(|| format!("Invalid repo format: {}", repo))?;
 
-                let prs = self.fetch_dependabot_prs_for_repo(repo).await?;
-                review_items.extend(prs.into_iter().map(|pr| ReviewItem {
-                    repo: repo.clone(),
-                    owner: owner.to_string(),
-                    repo_name: repo_name.to_string(),
-                    pr,
-                }));
+                    Ok::<_, Report<AppError>>((
+                        repo.clone(),
+                        owner.to_owned(),
+                        repo_name.to_owned(),
+                    ))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let mut review_items = Vec::new();
+            let repo_tasks = repo_targets.into_iter().map(|(repo, owner, repo_name)| {
+                let loading_state = loading_state.clone();
+                async move {
+                    if let Some(loading) = &loading_state {
+                        loading.start(&repo);
+                    }
+                    let result = self.fetch_dependabot_prs_for_repo(&repo).await;
+                    if let Some(loading) = &loading_state {
+                        loading.finish(&repo);
+                    }
+                    let prs = result?;
+
+                    Ok::<_, Report<AppError>>(
+                        prs.into_iter()
+                            .map(|pr| ReviewItem {
+                                repo: repo.clone(),
+                                owner: owner.clone(),
+                                repo_name: repo_name.clone(),
+                                pr,
+                            })
+                            .collect::<Vec<_>>(),
+                    )
+                }
+            });
+            let mut repo_tasks = futures_util::stream::iter(repo_tasks)
+                .buffered_unordered(MAX_CONCURRENT_REPO_FETCHES);
+            while let Some(result) = repo_tasks.next().await {
+                review_items.extend(result?);
             }
+            drop(loading_spinner);
 
             review_items.sort_by(|a, b| {
                 a.repo
@@ -1554,6 +1677,38 @@ mod tests {
         assert!(!should_render_status_rows(false, true));
         assert!(!should_render_status_rows(true, false));
         assert!(should_render_status_rows(false, false));
+    }
+
+    #[test]
+    fn loading_spinner_tracks_active_repositories_and_clears() {
+        let term = RecordingTerm::default();
+        let loading = PrLoadingSpinner::with_draw_target(ProgressDrawTarget::term_like(Box::new(
+            term.clone(),
+        )));
+        let state = loading.state();
+
+        state.start("example/first");
+        assert_eq!(state.spinner.message(), "Loading PRs for example/first");
+        state.start("example/second");
+        assert_eq!(
+            state.spinner.message(),
+            "Loading PRs for example/first, example/second"
+        );
+        state.finish("example/first");
+        assert_eq!(state.spinner.message(), "Loading PRs for example/second");
+        state.finish("example/second");
+        assert_eq!(state.spinner.message(), "Loading PRs");
+
+        loading.finish();
+
+        assert!(state.spinner.is_finished());
+        assert!(term.clear_count() > 0, "finishing should clear the spinner");
+    }
+
+    #[test]
+    fn loading_spinner_is_disabled_for_verbose_runs() {
+        assert!(!should_render_loading_spinner(true));
+        assert!(should_render_loading_spinner(false));
     }
 
     #[test]
