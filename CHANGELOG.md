@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+## [0.1.4](https://github.com/robjtede/dependabot-reviewer/compare/v0.1.3...v0.1.4) - 2026-08-07
+
+### Other
+
+- move merge queue inspection ([#44](https://github.com/robjtede/dependabot-reviewer/pull/44))
+- extract approval workflow ([#42](https://github.com/robjtede/dependabot-reviewer/pull/42))
+
 ## [0.1.3](https://github.com/robjtede/dependabot-reviewer/compare/v0.1.2...v0.1.3) - 2026-08-03
 
 No significant changes since `0.1.2`.
