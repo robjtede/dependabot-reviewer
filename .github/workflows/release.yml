@@ -127,7 +127,7 @@ jobs:
       - release
       - upload-assets
     permissions:
-      contents: read
+      contents: write
       pull-requests: write
     if: ${{ needs.release.outputs.releases_created == 'true' }}
     runs-on: ubuntu-latest
