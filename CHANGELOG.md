@@ -10,13 +10,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Added
 
-- Option to close PRs
-
-### Other
-
-- *(deps)* bump futures-util from 0.3.32 to 0.3.33
-- move merge queue inspection ([#44](https://github.com/robjtede/dependabot-reviewer/pull/44))
-- extract approval workflow ([#42](https://github.com/robjtede/dependabot-reviewer/pull/42))
+- Option to close PRs.
 
 ## [0.1.3](https://github.com/robjtede/dependabot-reviewer/compare/v0.1.2...v0.1.3) - 2026-08-03
 
