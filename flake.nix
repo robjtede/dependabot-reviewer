@@ -27,7 +27,7 @@
               pkgs.cargo-hack
               pkgs.fd
               pkgs.just
-              pkgs.nodePackages.prettier
+              pkgs.prettier
               pkgs.taplo
             ];
           };
