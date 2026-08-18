@@ -1,6 +1,6 @@
 # dependabot-reviewer
 
-`dependabot-reviewer` reviews Dependabot pull requests across GitHub repositories. It can open unreviewed pull requests, approve and merge updates, or ask Dependabot to rebase or recreate updates.
+`dependabot-reviewer` reviews Dependabot pull requests across GitHub repositories. It can open unreviewed pull requests, approve and merge updates, close updates, or ask Dependabot to rebase or recreate them.
 
 ## Install
 
@@ -57,6 +57,8 @@ Use `--dry-run` to show the selected action without changing pull requests:
 ```sh
 dependabot-reviewer --org owner --repo owner/repository --action approve-merge --dry-run
 ```
+
+Use `--action close` to close selected pull requests. Add `--dry-run` to preview the action first.
 
 Run `dependabot-reviewer --help` to see all options.
 

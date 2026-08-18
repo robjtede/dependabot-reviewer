@@ -174,6 +174,9 @@ impl App {
                 Action::ApproveMerge => {
                     println!("Finished processing selected PRs for approval and merge.");
                 }
+                Action::Close => {
+                    println!("Finished closing selected PRs.");
+                }
                 Action::Rebase => {
                     println!("Dependabot will rebase each PR automatically.");
                     println!("You can monitor the progress in the PRs.");

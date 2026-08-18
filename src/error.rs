@@ -17,6 +17,9 @@ pub enum AppError {
     #[display("Failed to approve or merge PR")]
     ApproveMerge,
 
+    #[display("Failed to close PR")]
+    Close,
+
     #[display("Interactive prompt failed")]
     Interactive,
 

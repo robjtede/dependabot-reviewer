@@ -6,7 +6,10 @@ use error_stack::{Report, ResultExt as _};
 use futures_buffered::BufferedStreamExt;
 use futures_util::{FutureExt as _, StreamExt as _};
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
-use octocrab::{models::pulls::ReviewAction, params::pulls::MergeMethod};
+use octocrab::{
+    models::pulls::ReviewAction,
+    params::pulls::{MergeMethod, State as PullRequestState},
+};
 use serde::{Deserialize, Serialize};
 
 use super::{
@@ -278,6 +281,7 @@ impl App {
                     "Open Unreviewed In Browser",
                     "Rebase",
                     "Recreate",
+                    "Close",
                     "Print Agent Prompt for Failing CI",
                     "Refresh PR State",
                 ];
@@ -293,8 +297,9 @@ impl App {
                     1 => PromptChoice::Action(Action::OpenUnreviewedInBrowser),
                     2 => PromptChoice::Action(Action::Rebase),
                     3 => PromptChoice::Action(Action::Recreate),
-                    4 => PromptChoice::PrintFailingCiPrompt,
-                    5 => PromptChoice::Refresh,
+                    4 => PromptChoice::Action(Action::Close),
+                    5 => PromptChoice::PrintFailingCiPrompt,
+                    6 => PromptChoice::Refresh,
                     _ => {
                         return Err(Report::new(AppError::ActionSelection).attach(format!(
                             "Action selection {selection} is outside the available options"
@@ -365,7 +370,7 @@ impl App {
                 None
             };
 
-            let mut comment_tasks = Vec::new();
+            let mut action_tasks = Vec::new();
             let mut merge_infos: Vec<MergeInfo> = Vec::new();
             let mut state_changed = false;
             let mut pr_statuses = (should_render_status_rows(self.cli.dry_run, self.cli.verbose)
@@ -395,6 +400,14 @@ impl App {
                             }
                             println!(
                                 "  [DRY RUN] Would open PR #{}{}: {}",
+                                item.pr.number,
+                                style(format!(" ({})", item.repo)).dim(),
+                                item.pr.url
+                            );
+                        }
+                        Action::Close => {
+                            println!(
+                                "  [DRY RUN] Would close PR #{}{}: {}",
                                 item.pr.number,
                                 style(format!(" ({})", item.repo)).dim(),
                                 item.pr.url
@@ -606,6 +619,23 @@ impl App {
                             performed_action = Some(action);
                             opened_in_browser_in_session = true;
                         }
+                        Action::Close => {
+                            if let Some(statuses) = &pr_statuses {
+                                statuses.update(&item.repo, pr_number, "Closing pull request");
+                            }
+                            let owner = item.owner.clone();
+                            let repo_name = item.repo_name.clone();
+                            let repo = item.repo.clone();
+                            action_tasks.push(
+                                async move {
+                                    self.close_pull_request(&owner, &repo_name, pr_number)
+                                        .await?;
+
+                                    Ok::<_, Report<_>>((pr_number, repo))
+                                }
+                                .boxed(),
+                            );
+                        }
                         Action::Rebase => {
                             if let Some(statuses) = &pr_statuses {
                                 statuses.update(
@@ -617,7 +647,7 @@ impl App {
                             let owner = item.owner.clone();
                             let repo_name = item.repo_name.clone();
                             let repo = item.repo.clone();
-                            comment_tasks.push(
+                            action_tasks.push(
                                 async move {
                                     self.debug(&format!("Commenting on PR #{}", pr_number));
 
@@ -647,7 +677,7 @@ impl App {
                             let owner = item.owner.clone();
                             let repo_name = item.repo_name.clone();
                             let repo = item.repo.clone();
-                            comment_tasks.push(
+                            action_tasks.push(
                                 async move {
                                     self.debug(&format!("Commenting on PR #{}", pr_number));
 
@@ -701,17 +731,23 @@ impl App {
                 }
             }
 
-            if !comment_tasks.is_empty() {
-                let mut stream = futures_util::stream::iter(comment_tasks).buffered_unordered(5);
+            if !action_tasks.is_empty() {
+                let (status, output) = if matches!(action, Action::Close) {
+                    ("Closed pull request", "Closed")
+                } else {
+                    ("Dependabot request sent", "Commented on")
+                };
+                let mut stream = futures_util::stream::iter(action_tasks).buffered_unordered(5);
 
                 while let Some(result) = stream.next().await {
                     let (pr_number, repo) = result?;
                     if let Some(statuses) = &pr_statuses {
-                        statuses.finish_success(&repo, pr_number, "Dependabot request sent");
+                        statuses.finish_success(&repo, pr_number, status);
                     } else {
                         println!(
-                            "  {} Commented on PR #{}{}",
+                            "  {} {} PR #{}{}",
                             style("✓").green(),
+                            output,
                             pr_number,
                             style(format!(" ({})", repo)).dim()
                         );
@@ -1144,6 +1180,26 @@ impl App {
             .await
             .change_context(AppError::ApproveMerge)
             .attach(format!("Failed to approve PR #{}", pr_number))?;
+
+        Ok(())
+    }
+
+    async fn close_pull_request(
+        &self,
+        owner: &str,
+        repo_name: &str,
+        pr_number: u64,
+    ) -> Result<(), Report<AppError>> {
+        self.debug(&format!("Closing PR #{}", pr_number));
+
+        self.octocrab
+            .pulls(owner, repo_name)
+            .update(pr_number)
+            .state(PullRequestState::Closed)
+            .send()
+            .await
+            .change_context(AppError::Close)
+            .attach(format!("Failed to close PR #{}", pr_number))?;
 
         Ok(())
     }

@@ -2,7 +2,7 @@ use clap::{Parser, ValueEnum};
 
 #[derive(Parser, Debug)]
 #[command(name = "dependabot-reviewer")]
-#[command(about = "Mass rebase or recreate Dependabot PRs across repositories", long_about = None)]
+#[command(about = "Review and manage Dependabot PRs across repositories", long_about = None)]
 pub struct Cli {
     /// GitHub organizations to search (can be used multiple times).
     #[arg(short, long)]
@@ -45,6 +45,7 @@ pub struct Cli {
 pub enum Action {
     OpenUnreviewedInBrowser,
     ApproveMerge,
+    Close,
     Rebase,
     Recreate,
 }
@@ -53,7 +54,7 @@ pub enum Action {
 mod tests {
     use clap::Parser as _;
 
-    use super::Cli;
+    use super::{Action, Cli};
 
     #[test]
     fn parses_use_gh_auth_token() {
@@ -61,5 +62,13 @@ mod tests {
             .expect("flag should parse");
 
         assert!(cli.use_gh_auth_token);
+    }
+
+    #[test]
+    fn parses_close_action() {
+        let cli = Cli::try_parse_from(["dependabot-reviewer", "--action", "close"])
+            .expect("close action should parse");
+
+        assert!(matches!(cli.action, Some(Action::Close)));
     }
 }
