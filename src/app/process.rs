@@ -117,6 +117,17 @@ impl PrStatusRows {
     }
 }
 
+impl Drop for PrStatusRows {
+    fn drop(&mut self) {
+        for bar in self.bars.values() {
+            bar.disable_steady_tick();
+            if !bar.is_finished() {
+                bar.abandon();
+            }
+        }
+    }
+}
+
 #[derive(Debug)]
 enum EnqueuePullRequestOutcome {
     Queued,
@@ -1603,6 +1614,23 @@ mod tests {
             writes_before_drop,
             "dropping status rows must not redraw over the final application output"
         );
+    }
+
+    #[test]
+    fn status_rows_stop_when_processing_returns_an_error() {
+        let statuses = PrStatusRows::with_draw_target(
+            [("example/repo".to_string(), 1)],
+            ProgressDrawTarget::hidden(),
+        );
+        let bar = statuses.bars.values().next().expect("status bar").clone();
+        let process = || -> Result<(), &'static str> {
+            let _statuses = statuses;
+            Err("Pull Request has merge conflicts")?;
+            Ok(())
+        };
+
+        assert!(process().is_err());
+        assert!(bar.is_finished(), "error returns must stop status rows");
     }
 
     #[test]
