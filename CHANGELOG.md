@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+## [0.1.5](https://github.com/robjtede/dependabot-reviewer/compare/v0.1.4...v0.1.5) - 2026-09-10
+
+### Fixed
+
+- stop progress rows when processing fails
+
+### Other
+
+- *(deps)* bump toml from 1.1.4+spec-1.1.0 to 1.1.5+spec-1.1.0
+
 ## [0.1.4](https://github.com/robjtede/dependabot-reviewer/compare/v0.1.3...v0.1.4) - 2026-08-18
 
 ### Added

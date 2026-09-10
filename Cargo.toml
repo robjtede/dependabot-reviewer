@@ -1,6 +1,6 @@
 [package]
 name = "dependabot-reviewer"
-version = "0.1.4"
+version = "0.1.5"
 description = "Review, close, rebase, recreate, and merge Dependabot pull requests across GitHub repositories"
 authors = ["Rob Ede <robjtede@icloud.com>"]
 keywords = ["dependabot", "github", "automation", "cli", "dependencies"]
