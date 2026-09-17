@@ -26,7 +26,7 @@ impl App {
         println!();
 
         let selections = MultiSelect::with_theme(&ColorfulTheme::default())
-            .with_prompt("Choose repositories")
+            .with_prompt("Choose repositories (Space to select or deselect, Enter to confirm)")
             .items(&items)
             .interact()
             .change_context(AppError::Interactive)
