@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+## [0.1.8](https://github.com/robjtede/dependabot-reviewer/compare/v0.1.7...v0.1.8) - 2026-09-17
+
+### Fixed
+
+- show keyboard controls when selecting repositories
+
 ## [0.1.7](https://github.com/robjtede/dependabot-reviewer/compare/v0.1.6...v0.1.7) - 2026-09-17
 
 ### Added
