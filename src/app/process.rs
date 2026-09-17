@@ -383,6 +383,7 @@ impl App {
             let mut action_tasks = Vec::new();
             let mut merge_infos: Vec<MergeInfo> = Vec::new();
             let mut state_changed = false;
+            let mut merge_failures = Vec::new();
             let mut pr_statuses = (should_render_status_rows(self.cli.dry_run, self.cli.verbose)
                 && !matches!(action, Action::ApproveMerge))
             .then(|| {
@@ -821,7 +822,7 @@ impl App {
                 // Merges must run sequentially: each merge modifies the base branch,
                 // which invalidates the head SHA of subsequent PRs. Running them in
                 // parallel causes "Base branch was modified" errors.
-                for info in &merge_infos {
+                merge_failures = process_merge_batch(&merge_infos, async |info| {
                     if let Some(statuses) = &pr_statuses {
                         statuses.update(&info.repo, info.pr_number, "Inspecting merge strategy");
                     }
@@ -1076,7 +1077,7 @@ impl App {
                                     style(format!(" ({})", info.repo)).dim()
                                 );
                             }
-                            continue;
+                            return Ok(());
                         }
                     }
 
@@ -1086,6 +1087,15 @@ impl App {
                     }
 
                     performed_action = Some(action);
+
+                    Ok(())
+                })
+                .await;
+
+                for (info, _) in &merge_failures {
+                    if let Some(statuses) = &pr_statuses {
+                        statuses.complete(&info.repo, info.pr_number, "✗ Approval or merge failed");
+                    }
                 }
             }
 
@@ -1100,6 +1110,20 @@ impl App {
                     style("✓").green(),
                     style(state_path.as_str()).dim()
                 );
+            }
+
+            if !merge_failures.is_empty() {
+                let mut report = Report::new(AppError::ApproveMerge).attach(format!(
+                    "{} of {} PR(s) failed; all remaining PRs were processed",
+                    merge_failures.len(),
+                    merge_infos.len(),
+                ));
+
+                for (info, error) in merge_failures {
+                    report = report.attach(format!("{}#{}: {error:?}", info.repo, info.pr_number));
+                }
+
+                return Err(report);
             }
 
             if matches!(action, Action::OpenUnreviewedInBrowser)
@@ -1366,6 +1390,21 @@ impl App {
     }
 }
 
+async fn process_merge_batch<T>(
+    items: &[T],
+    mut process: impl AsyncFnMut(&T) -> Result<(), Report<AppError>>,
+) -> Vec<(&T, Report<AppError>)> {
+    let mut failures = Vec::new();
+
+    for item in items {
+        if let Err(error) = process(item).await {
+            failures.push((item, error));
+        }
+    }
+
+    failures
+}
+
 fn graphql_error_is_awaiting_required_checks(error: &octocrab::Error) -> bool {
     let octocrab::Error::Graphql { source, .. } = error else {
         return false;
@@ -1562,6 +1601,52 @@ mod tests {
         fn flush(&self) -> io::Result<()> {
             Ok(())
         }
+    }
+
+    #[tokio::test]
+    async fn merge_batch_continues_after_a_conflict() {
+        let mut attempted = Vec::new();
+        let mut completed = Vec::new();
+        let prs = [1, 2, 3, 4];
+
+        let failures = process_merge_batch(&prs, async |pr| {
+            attempted.push(*pr);
+
+            if *pr == 2 || *pr == 4 {
+                return Err(
+                    Report::new(AppError::ApproveMerge).attach("Pull Request has merge conflicts")
+                );
+            }
+
+            completed.push(*pr);
+            Ok(())
+        })
+        .await;
+
+        assert_eq!(attempted, [1, 2, 3, 4]);
+        assert_eq!(completed, [1, 3]);
+        assert_eq!(
+            failures.iter().map(|(pr, _)| **pr).collect::<Vec<_>>(),
+            [2, 4]
+        );
+        assert!(
+            format!("{:?}", failures.first().expect("first failure").1).contains("merge conflicts")
+        );
+    }
+
+    #[tokio::test]
+    async fn merge_batch_returns_no_failures_when_all_prs_succeed() {
+        let mut completed = Vec::new();
+        let prs = [1, 2];
+
+        let failures = process_merge_batch(&prs, async |pr| {
+            completed.push(*pr);
+            Ok(())
+        })
+        .await;
+
+        assert_eq!(completed, prs);
+        assert!(failures.is_empty());
     }
 
     #[test]
