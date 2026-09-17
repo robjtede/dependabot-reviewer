@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+## [0.1.7](https://github.com/robjtede/dependabot-reviewer/compare/v0.1.6...v0.1.7) - 2026-09-17
+
+### Added
+
+- offer Dependabot rebase after conflicted merges
+
+### Fixed
+
+- explain PR discovery failures and rate limit retry times
+- continue processing PRs after approval or merge failures
+- hide non-passing CI action when all checks pass
+
 ## [0.1.6](https://github.com/robjtede/dependabot-reviewer/compare/v0.1.5...v0.1.6) - 2026-09-17
 
 ### Added
