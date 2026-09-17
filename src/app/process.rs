@@ -134,6 +134,7 @@ enum EnqueuePullRequestOutcome {
     AwaitingRequiredChecks,
 }
 
+#[derive(Clone, Copy)]
 enum PromptChoice {
     Refresh,
     PrintFailingCiPrompt,
@@ -288,16 +289,37 @@ impl App {
             let prompt_choice = if let Some(action) = self.cli.action {
                 PromptChoice::Action(action)
             } else {
-                let items = vec![
+                let mut choices = vec![(
                     "Approve + Merge",
-                    "Approve + Merge (including failing and pending CI)",
-                    "Open Unreviewed In Browser",
-                    "Rebase",
-                    "Recreate",
-                    "Close",
-                    "Print Agent Prompt for Failing CI",
-                    "Refresh PR State",
-                ];
+                    PromptChoice::Action(Action::ApproveMerge),
+                )];
+
+                if review_items
+                    .iter()
+                    .any(|item| matches!(item.pr.ci_status, CiStatus::Failing | CiStatus::Pending))
+                {
+                    choices.push((
+                        "Approve + Merge (including failing and pending CI)",
+                        PromptChoice::ApproveMergeIncludingNonPassingCi,
+                    ));
+                }
+
+                choices.extend([
+                    (
+                        "Open Unreviewed In Browser",
+                        PromptChoice::Action(Action::OpenUnreviewedInBrowser),
+                    ),
+                    ("Rebase", PromptChoice::Action(Action::Rebase)),
+                    ("Recreate", PromptChoice::Action(Action::Recreate)),
+                    ("Close", PromptChoice::Action(Action::Close)),
+                    (
+                        "Print Agent Prompt for Failing CI",
+                        PromptChoice::PrintFailingCiPrompt,
+                    ),
+                    ("Refresh PR State", PromptChoice::Refresh),
+                ]);
+
+                let items: Vec<_> = choices.iter().map(|(label, _)| *label).collect();
                 let selection = Select::with_theme(&ColorfulTheme::default())
                     .with_prompt("Choose action to apply to these PRs")
                     .items(&items)
@@ -305,21 +327,14 @@ impl App {
                     .interact()
                     .change_context(AppError::ActionSelection)
                     .attach("Action selection failed")?;
-                match selection {
-                    0 => PromptChoice::Action(Action::ApproveMerge),
-                    1 => PromptChoice::ApproveMergeIncludingNonPassingCi,
-                    2 => PromptChoice::Action(Action::OpenUnreviewedInBrowser),
-                    3 => PromptChoice::Action(Action::Rebase),
-                    4 => PromptChoice::Action(Action::Recreate),
-                    5 => PromptChoice::Action(Action::Close),
-                    6 => PromptChoice::PrintFailingCiPrompt,
-                    7 => PromptChoice::Refresh,
-                    _ => {
-                        return Err(Report::new(AppError::ActionSelection).attach(format!(
+                choices
+                    .get(selection)
+                    .map(|(_, choice)| *choice)
+                    .ok_or_else(|| {
+                        Report::new(AppError::ActionSelection).attach(format!(
                             "Action selection {selection} is outside the available options"
-                        )));
-                    }
-                }
+                        ))
+                    })?
             };
 
             let (action, allow_non_passing_ci) = match prompt_choice {
