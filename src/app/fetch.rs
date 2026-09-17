@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, time::SystemTime};
 
 use error_stack::{Report, ResultExt as _};
 use futures_buffered::BufferedStreamExt as _;
@@ -74,15 +74,12 @@ impl App {
             .ok_or_else(|| Report::new(AppError::InvalidInput))
             .attach_with(|| format!("Invalid repo format: {}", repo))?;
 
-        let prs_page = self
-            .octocrab
-            .pulls(owner, repo_name)
-            .list()
-            .state(octocrab::params::State::Open)
-            .send()
-            .await
-            .change_context(AppError::GitHubApi)
-            .attach_with(|| format!("Failed to fetch PRs for {}", repo))?;
+        let prs_page = discovery_get::<octocrab::Page<octocrab::models::pulls::PullRequest>>(
+            &self.octocrab,
+            &format!("/repos/{owner}/{repo_name}/pulls?state=open"),
+        )
+        .await
+        .attach_with(|| format!("Failed to fetch PRs for {}", repo))?;
 
         let dependabot_prs: Vec<_> = prs_page
             .items
@@ -148,13 +145,15 @@ impl App {
                 }
 
                 let query = format!("org:{} author:dependabot[bot] is:pr is:open", org);
-                let page = octocrab
-                    .search()
-                    .issues_and_pull_requests(&query)
-                    .send()
-                    .await
-                    .change_context(AppError::Search)
-                    .attach_with(|| format!("Failed to search PRs in {}", org))?;
+                let parameters =
+                    serde_urlencoded::to_string([("q", query)]).change_context(AppError::Search)?;
+                let page = discovery_get::<octocrab::Page<octocrab::models::issues::Issue>>(
+                    &octocrab,
+                    &format!("/search/issues?{parameters}"),
+                )
+                .await
+                .change_context(AppError::Search)
+                .attach_with(|| format!("Failed to search PRs in {}", org))?;
 
                 Ok::<_, Report<AppError>>(page.items)
             });
@@ -175,5 +174,237 @@ impl App {
         }
 
         Ok(repo_counts)
+    }
+}
+
+async fn discovery_get<R: octocrab::FromResponse>(
+    octocrab: &octocrab::Octocrab,
+    route: &str,
+) -> Result<R, Report<AppError>> {
+    let result = async {
+        let response = octocrab._get(route).await.change_context(AppError::GitHubApi)?;
+        let status = response.status().as_u16();
+        let header_number = |name| {
+            response.headers().get(name)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse::<u64>().ok())
+        };
+        let retry_after = header_number("retry-after");
+        let remaining = header_number("x-ratelimit-remaining");
+        let reset = header_number("x-ratelimit-reset");
+
+        // Octocrab drops response headers when it converts a GitHub error.
+        let response = octocrab::map_github_error(response).await.map_err(|error| {
+            let rate_limit_message = match &error {
+                octocrab::Error::GitHub { source, .. } => {
+                    source.message.to_ascii_lowercase().contains("rate limit")
+                }
+                _ => false,
+            };
+            let rate_limited = status == 429
+                || (status == 403
+                    && (remaining == Some(0) || retry_after.is_some() || rate_limit_message));
+            let mut report = Report::new(error)
+                .change_context(AppError::GitHubApi)
+                .attach(format!("GitHub returned HTTP {status}"));
+
+            if rate_limited {
+                let delay = retry_after.or_else(|| {
+                    if remaining != Some(0) {
+                        return None;
+                    }
+
+                    let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).ok()?;
+                    reset.map(|reset| reset.saturating_sub(now.as_secs()).saturating_add(1))
+                });
+                let guidance = match delay {
+                    Some(1) => "GitHub rate limit reached. Retry after at least 1 second.".to_owned(),
+                    Some(seconds) => format!("GitHub rate limit reached. Retry after at least {seconds} seconds."),
+                    None => "GitHub rate limit reached. No retry time was provided. Wait at least 60 seconds before retrying; increase the wait if the limit persists.".to_owned(),
+                };
+
+                report = report.attach(guidance);
+            } else if matches!(status, 401 | 403) {
+                report = report.attach("Check that your GitHub token is valid and has access to the requested repositories and organizations.");
+            }
+
+            report
+        })?;
+
+        R::from_response(response).await.change_context(AppError::GitHubApi)
+    }
+    .await;
+
+    result.attach("PR discovery failed. This does not mean there are no open Dependabot PRs.")
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::{
+        io::{AsyncReadExt as _, AsyncWriteExt as _},
+        net::TcpListener,
+    };
+
+    use super::*;
+
+    async fn discover(
+        status: u16,
+        headers: &str,
+        body: &str,
+    ) -> Result<octocrab::Page<String>, Report<AppError>> {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let address = listener.local_addr().expect("test address");
+        let response = format!("HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n{headers}\r\n{body}", body.len());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept request");
+            let mut request = Vec::new();
+            let mut buffer = [0; 1024];
+
+            while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                let count = socket.read(&mut buffer).await.expect("read request");
+                assert_ne!(count, 0, "request ended before headers");
+                request.extend_from_slice(&buffer[..count]);
+            }
+
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("write response");
+        });
+        let octocrab = octocrab::Octocrab::builder()
+            .base_uri(format!("http://{address}"))
+            .expect("test URI")
+            .add_retry_config(octocrab::service::middleware::retry::RetryConfig::None)
+            .build()
+            .expect("test client");
+        let result = discovery_get(&octocrab, "/search/issues?q=test").await;
+        server.await.expect("test server");
+        result
+    }
+
+    #[tokio::test]
+    async fn discovery_reports_rate_limit_retry_delay() {
+        let error = discover(
+            429,
+            "retry-after: 120\r\n",
+            r#"{"message":"You have exceeded a secondary rate limit."}"#,
+        )
+        .await
+        .expect_err("rate limit must fail discovery");
+        let message = format!("{error:?}");
+
+        assert!(
+            message.contains("Retry after at least 120 seconds"),
+            "{message}"
+        );
+        assert!(message.contains("This does not mean there are no open"));
+    }
+
+    #[tokio::test]
+    async fn discovery_uses_primary_rate_limit_reset() {
+        let error = discover(
+            403,
+            "x-ratelimit-remaining: 0\r\nx-ratelimit-reset: 0\r\n",
+            r#"{"message":"API rate limit exceeded"}"#,
+        )
+        .await
+        .expect_err("rate limit must fail discovery");
+        let message = format!("{error:?}");
+
+        assert!(
+            message.contains("Retry after at least 1 second."),
+            "{message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn discovery_prefers_retry_after_over_reset() {
+        let error = discover(
+            403,
+            "retry-after: 120\r\nx-ratelimit-remaining: 0\r\nx-ratelimit-reset: 0\r\n",
+            r#"{"message":"API rate limit exceeded"}"#,
+        )
+        .await
+        .expect_err("rate limit must fail discovery");
+
+        assert!(format!("{error:?}").contains("Retry after at least 120 seconds"));
+    }
+
+    #[tokio::test]
+    async fn discovery_reports_secondary_rate_limit_without_valid_headers() {
+        let error = discover(
+            403,
+            "retry-after: invalid\r\nx-ratelimit-remaining: 10\r\nx-ratelimit-reset: 0\r\n",
+            r#"{"message":"You have exceeded a secondary rate limit."}"#,
+        )
+        .await
+        .expect_err("secondary rate limit must fail discovery");
+
+        assert!(format!("{error:?}").contains("Wait at least 60 seconds"));
+    }
+
+    #[tokio::test]
+    async fn discovery_reports_rate_limits_without_timing_headers() {
+        for status in [403, 429] {
+            let error = discover(status, "", r#"{"message":"API rate limit exceeded"}"#)
+                .await
+                .expect_err("rate limit must fail discovery");
+
+            assert!(format!("{error:?}").contains("Wait at least 60 seconds"));
+        }
+    }
+
+    #[tokio::test]
+    async fn discovery_does_not_label_permission_errors_as_rate_limits() {
+        let error = discover(
+            403,
+            "x-ratelimit-remaining: 10\r\nx-ratelimit-reset: 0\r\n",
+            r#"{"message":"Resource not accessible by personal access token"}"#,
+        )
+        .await
+        .expect_err("permission error must fail discovery");
+        let message = format!("{error:?}");
+
+        assert!(message.contains("GitHub token is valid"));
+        assert!(message.contains("Resource not accessible"));
+        assert!(!message.contains("GitHub rate limit reached"));
+        assert!(message.contains("PR discovery failed"));
+    }
+
+    #[tokio::test]
+    async fn discovery_keeps_server_errors_distinct_from_empty_results() {
+        let error = discover(500, "", r#"{"message":"Internal Server Error"}"#)
+            .await
+            .expect_err("server error must fail discovery");
+        let message = format!("{error:?}");
+
+        assert!(message.contains("HTTP 500"));
+        assert!(message.contains("Internal Server Error"));
+        assert!(message.contains("PR discovery failed"));
+        assert!(!message.contains("GitHub rate limit reached"));
+    }
+
+    #[tokio::test]
+    async fn discovery_preserves_repository_results() {
+        let page = discover(200, "", r#"["first", "second"]"#)
+            .await
+            .expect("successful repository response");
+
+        assert_eq!(page.items, ["first", "second"]);
+    }
+
+    #[tokio::test]
+    async fn discovery_preserves_successful_empty_results() {
+        let page = discover(
+            200,
+            "",
+            r#"{"items":[],"total_count":0,"incomplete_results":false}"#,
+        )
+        .await
+        .expect("successful empty search");
+
+        assert!(page.items.is_empty());
     }
 }

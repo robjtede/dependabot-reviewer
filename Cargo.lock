@@ -341,6 +341,7 @@ dependencies = [
  "octocrab",
  "semver",
  "serde",
+ "serde_urlencoded",
  "tokio",
  "toml",
 ]
