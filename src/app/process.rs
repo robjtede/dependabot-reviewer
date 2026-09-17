@@ -137,6 +137,7 @@ enum EnqueuePullRequestOutcome {
 enum PromptChoice {
     Refresh,
     PrintFailingCiPrompt,
+    ApproveMergeIncludingNonPassingCi,
     Action(Action),
 }
 
@@ -289,6 +290,7 @@ impl App {
             } else {
                 let items = vec![
                     "Approve + Merge",
+                    "Approve + Merge (including failing and pending CI)",
                     "Open Unreviewed In Browser",
                     "Rebase",
                     "Recreate",
@@ -305,12 +307,13 @@ impl App {
                     .attach("Action selection failed")?;
                 match selection {
                     0 => PromptChoice::Action(Action::ApproveMerge),
-                    1 => PromptChoice::Action(Action::OpenUnreviewedInBrowser),
-                    2 => PromptChoice::Action(Action::Rebase),
-                    3 => PromptChoice::Action(Action::Recreate),
-                    4 => PromptChoice::Action(Action::Close),
-                    5 => PromptChoice::PrintFailingCiPrompt,
-                    6 => PromptChoice::Refresh,
+                    1 => PromptChoice::ApproveMergeIncludingNonPassingCi,
+                    2 => PromptChoice::Action(Action::OpenUnreviewedInBrowser),
+                    3 => PromptChoice::Action(Action::Rebase),
+                    4 => PromptChoice::Action(Action::Recreate),
+                    5 => PromptChoice::Action(Action::Close),
+                    6 => PromptChoice::PrintFailingCiPrompt,
+                    7 => PromptChoice::Refresh,
                     _ => {
                         return Err(Report::new(AppError::ActionSelection).attach(format!(
                             "Action selection {selection} is outside the available options"
@@ -319,7 +322,7 @@ impl App {
                 }
             };
 
-            let action = match prompt_choice {
+            let (action, allow_non_passing_ci) = match prompt_choice {
                 PromptChoice::Refresh => {
                     println!();
                     continue;
@@ -331,27 +334,8 @@ impl App {
                     }
                     return Ok(performed_action);
                 }
-                PromptChoice::Action(action) => action,
-            };
-
-            let allow_non_passing_ci = if matches!(action, Action::ApproveMerge) {
-                if self.cli.allow_non_passing_ci {
-                    true
-                } else if self.cli.action.is_none()
-                    && std::io::stdin().is_terminal()
-                    && std::io::stdout().is_terminal()
-                {
-                    Confirm::with_theme(&ColorfulTheme::default())
-                        .with_prompt("Attempt approve+merge even when CI is pending or failing?")
-                        .default(false)
-                        .interact()
-                        .change_context(AppError::Interactive)
-                        .attach("Non-passing CI confirmation failed")?
-                } else {
-                    false
-                }
-            } else {
-                false
+                PromptChoice::ApproveMergeIncludingNonPassingCi => (Action::ApproveMerge, true),
+                PromptChoice::Action(action) => (action, self.cli.allow_non_passing_ci),
             };
 
             let approve_merge_context = if matches!(action, Action::ApproveMerge) {
