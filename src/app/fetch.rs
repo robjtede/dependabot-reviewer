@@ -112,6 +112,7 @@ impl App {
                 title,
                 url: pr.html_url.map(|u| u.to_string()).unwrap_or_default(),
                 base_ref_name: pr.base.ref_field,
+                head_ref_name: head_ref,
                 ci_status,
                 dep_update,
             }

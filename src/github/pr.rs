@@ -13,6 +13,7 @@ pub struct PrInfo {
     pub title: String,
     pub url: String,
     pub base_ref_name: String,
+    pub head_ref_name: String,
     pub ci_status: CiStatus,
     pub dep_update: Option<DepUpdate>,
 }

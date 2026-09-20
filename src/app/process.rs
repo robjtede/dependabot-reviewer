@@ -353,6 +353,28 @@ impl App {
                 PromptChoice::Action(action) => (action, self.cli.allow_non_passing_ci),
             };
 
+            if matches!(action, Action::ApproveMerge) {
+                let mut lockfiles = HashMap::new();
+                let mut eligible_items = Vec::new();
+
+                for item in review_items {
+                    if has_actions_lock(&self.octocrab, &item, &mut lockfiles).await? {
+                        println!(
+                            "  {} Skipping {}#{}: .github/workflows/actions.lock exists on {}; Dependabot cannot update this lockfile.",
+                            style("⊘").yellow(), item.repo, item.pr.number, item.pr.base_ref_name,
+                        );
+                    } else {
+                        eligible_items.push(item);
+                    }
+                }
+
+                review_items = eligible_items;
+
+                if review_items.is_empty() {
+                    return Ok(performed_action);
+                }
+            }
+
             let approve_merge_context = if matches!(action, Action::ApproveMerge) {
                 let mut contexts = std::collections::HashMap::new();
                 for repo in repos {
@@ -1425,6 +1447,55 @@ impl App {
     }
 }
 
+async fn has_actions_lock(
+    octocrab: &octocrab::Octocrab,
+    item: &ReviewItem,
+    cache: &mut HashMap<(String, String), bool>,
+) -> Result<bool, Report<AppError>> {
+    // Grouped update titles do not always parse as a single dependency update.
+    if !item
+        .pr
+        .head_ref_name
+        .starts_with("dependabot/github_actions/")
+    {
+        return Ok(false);
+    }
+
+    let key = (item.repo.clone(), item.pr.base_ref_name.clone());
+    if let Some(&exists) = cache.get(&key) {
+        return Ok(exists);
+    }
+
+    let query = serde_urlencoded::to_string([("ref", &item.pr.base_ref_name)])
+        .change_context(AppError::GitHubApi)?;
+    let route = format!(
+        "/repos/{}/contents/.github/workflows/actions.lock?{query}",
+        item.repo,
+    );
+    let response = octocrab
+        ._get(route)
+        .await
+        .change_context(AppError::GitHubApi)?;
+
+    let exists = if response.status().as_u16() == 404 {
+        false
+    } else {
+        octocrab::map_github_error(response)
+            .await
+            .change_context(AppError::GitHubApi)
+            .attach_with(|| {
+                format!(
+                    "Cannot check actions.lock for {} on {}; approval and merge stopped",
+                    item.repo, item.pr.base_ref_name,
+                )
+            })?;
+        true
+    };
+
+    cache.insert(key, exists);
+    Ok(exists)
+}
+
 async fn offer_conflict_rebase(
     octocrab: &octocrab::Octocrab,
     info: &MergeInfo,
@@ -1777,6 +1848,88 @@ mod tests {
         Report::new(error).change_context(AppError::ApproveMerge)
     }
 
+    fn actions_review_item() -> ReviewItem {
+        let mut item = review_item(
+            12,
+            "Bump the actions group with 3 updates",
+            CiStatus::Passing,
+        );
+        item.pr.head_ref_name = "dependabot/github_actions/actions-group".to_owned();
+        item.pr.base_ref_name = "release/1.x".to_owned();
+        item
+    }
+
+    #[tokio::test]
+    async fn actions_lock_blocks_grouped_updates_and_caches_by_repo_and_base() {
+        let (octocrab, server) = rebase_test_client(vec![(200, "{}".to_owned()); 3]).await;
+        let mut cache = HashMap::new();
+        let mut item = actions_review_item();
+
+        assert!(has_actions_lock(&octocrab, &item, &mut cache)
+            .await
+            .expect("lock check"));
+        assert!(has_actions_lock(&octocrab, &item, &mut cache)
+            .await
+            .expect("cached check"));
+
+        item.pr.base_ref_name = "main".to_owned();
+        assert!(has_actions_lock(&octocrab, &item, &mut cache)
+            .await
+            .expect("other base"));
+
+        item.repo = "example/other".to_owned();
+        item.repo_name = "other".to_owned();
+        assert!(has_actions_lock(&octocrab, &item, &mut cache)
+            .await
+            .expect("other repo"));
+
+        let requests = server.await.expect("test server");
+        assert_eq!(requests.len(), 3);
+        assert!(requests.first().expect("request").starts_with(
+            "GET /repos/example/repo/contents/.github/workflows/actions.lock?ref=release%2F1.x "
+        ));
+    }
+
+    #[tokio::test]
+    async fn actions_lock_allows_missing_lockfile() {
+        let (octocrab, server) =
+            rebase_test_client(vec![(404, r#"{"message":"Not Found"}"#.to_owned())]).await;
+
+        assert!(
+            !has_actions_lock(&octocrab, &actions_review_item(), &mut HashMap::new())
+                .await
+                .expect("missing lockfile")
+        );
+        server.await.expect("test server");
+    }
+
+    #[tokio::test]
+    async fn actions_lock_lookup_errors_prevent_approval() {
+        for status in [403, 429, 500] {
+            let (octocrab, server) =
+                rebase_test_client(vec![(status, r#"{"message":"lookup failed"}"#.to_owned())])
+                    .await;
+
+            let error = has_actions_lock(&octocrab, &actions_review_item(), &mut HashMap::new())
+                .await
+                .expect_err("failed checks must stop approval");
+            assert!(format!("{error:?}").contains("approval and merge stopped"));
+            server.await.expect("test server");
+        }
+    }
+
+    #[tokio::test]
+    async fn actions_lock_does_not_block_other_ecosystems() {
+        let (octocrab, server) = rebase_test_client(vec![]).await;
+        let item = review_item(12, "Bump tokio from 1 to 2", CiStatus::Passing);
+        let mut cache = HashMap::from([((item.repo.clone(), item.pr.base_ref_name.clone()), true)]);
+
+        assert!(!has_actions_lock(&octocrab, &item, &mut cache)
+            .await
+            .expect("cargo update"));
+        assert!(server.await.expect("test server").is_empty());
+    }
+
     #[tokio::test]
     async fn conflict_rebase_posts_only_after_confirmation() {
         let (octocrab, server) = rebase_test_client(vec![
@@ -2124,6 +2277,7 @@ mod tests {
                 title: title.to_string(),
                 url: format!("https://github.com/example/repo/pull/{}", number),
                 base_ref_name: "main".to_string(),
+                head_ref_name: "dependabot/cargo/tokio-1.1.0".to_string(),
                 ci_status,
                 dep_update: None,
             },
