@@ -28,6 +28,7 @@ struct ReviewItem {
     owner: String,
     repo_name: String,
     pr: PrInfo,
+    actions_lock_check: Option<Result<bool, Report<AppError>>>,
 }
 
 struct MergeInfo {
@@ -222,6 +223,7 @@ impl App {
                     owner: owner.to_string(),
                     repo_name: repo_name.to_string(),
                     pr,
+                    actions_lock_check: None,
                 }));
             }
 
@@ -237,6 +239,12 @@ impl App {
             }
 
             let pending_statuses = self.fetch_pending_review_statuses(&review_items).await?;
+
+            let mut lockfiles = HashMap::new();
+            for item in &mut review_items {
+                item.actions_lock_check =
+                    Some(has_actions_lock(&self.octocrab, item, &mut lockfiles).await);
+            }
 
             println!("  Found {} Dependabot PR(s):", review_items.len());
             println!("  Review state: {}", style(state_path.as_str()).dim());
@@ -256,24 +264,23 @@ impl App {
                     .as_ref()
                     .map(|dep_update| review_state.is_previously_reviewed(dep_update))
                     .unwrap_or(false);
-                let review_badge = if previously_reviewed {
-                    style("previously reviewed").dim()
-                } else {
-                    style("unreviewed").red()
-                };
-                let pending_badge = pending_statuses
+                let pending_status = pending_statuses
                     .get(item.repo.as_str())
-                    .and_then(|statuses| statuses.get(&item.pr.number))
-                    .map(pending_status_badge);
+                    .and_then(|statuses| statuses.get(&item.pr.number));
+                let badges = review_badges(
+                    previously_reviewed,
+                    pending_status,
+                    item.actions_lock_check
+                        .as_ref()
+                        .expect("lockfile check ran"),
+                );
 
                 println!(
-                    "    {} #{}: {} [{}{}{}]\n        {}",
+                    "    {} #{}: {} [{}]\n        {}",
                     item.pr.ci_status.icon(),
                     item.pr.number,
                     item.pr.title,
-                    review_badge,
-                    if pending_badge.is_some() { ", " } else { "" },
-                    pending_badge.unwrap_or_default(),
+                    badges,
                     style(&item.pr.url).dim()
                 );
                 if item.pr.dep_update.is_none() {
@@ -1604,6 +1611,34 @@ fn pending_status_badge(status: &MergeQueueStatus) -> String {
     }
 }
 
+fn review_badges(
+    previously_reviewed: bool,
+    pending_status: Option<&MergeQueueStatus>,
+    actions_lock_check: &Result<bool, Report<AppError>>,
+) -> String {
+    let mut badges = vec![if previously_reviewed {
+        style("previously reviewed").dim().to_string()
+    } else {
+        style("unreviewed").red().to_string()
+    }];
+
+    if let Some(status) = pending_status {
+        badges.push(pending_status_badge(status));
+    }
+
+    match actions_lock_check {
+        Ok(true) => badges.push(style("will not merge: actions.lock").yellow().to_string()),
+        Err(_) => badges.push(
+            style("merge status unknown: actions.lock check failed")
+                .yellow()
+                .to_string(),
+        ),
+        Ok(false) => {}
+    }
+
+    badges.join(", ")
+}
+
 fn preferred_merge_method(
     repo_info: &octocrab::models::Repository,
 ) -> Result<MergeMethod, Report<AppError>> {
@@ -1857,6 +1892,23 @@ mod tests {
         item.pr.head_ref_name = "dependabot/github_actions/actions-group".to_owned();
         item.pr.base_ref_name = "release/1.x".to_owned();
         item
+    }
+
+    #[test]
+    fn actions_lock_badge_marks_pr_as_unmergeable_in_list() {
+        let badges = review_badges(false, None, &Ok(true));
+
+        assert!(badges.contains("unreviewed"));
+        assert!(badges.contains("will not merge: actions.lock"));
+    }
+
+    #[test]
+    fn actions_lock_badge_distinguishes_missing_and_failed_checks() {
+        let allowed = review_badges(false, None, &Ok(false));
+        let unknown = review_badges(false, None, &Err(Report::new(AppError::GitHubApi)));
+
+        assert_eq!(allowed, "unreviewed");
+        assert!(unknown.contains("merge status unknown: actions.lock check failed"));
     }
 
     #[tokio::test]
@@ -2281,6 +2333,7 @@ mod tests {
                 ci_status,
                 dep_update: None,
             },
+            actions_lock_check: None,
         }
     }
 }

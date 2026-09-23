@@ -60,7 +60,7 @@ dependabot-reviewer --org owner --repo owner/repository --action approve-merge -
 
 Use `--action close` to close selected pull requests. Add `--dry-run` to preview the action first.
 
-Approval and merge skip GitHub Actions updates when the target branch contains `.github/workflows/actions.lock`. Dependabot cannot update this lockfile. This guard also applies to grouped updates, dry runs, and `--allow-non-passing-ci`. Other dependency types are not affected. If the lockfile check fails, approval and merge stop.
+Approval and merge skip GitHub Actions updates when the target branch contains `.github/workflows/actions.lock`. Dependabot cannot update this lockfile. This guard also applies to grouped updates, dry runs, and `--allow-non-passing-ci`. Other dependency types are not affected. If the lockfile check fails, approval and merge stop. The pull request list marks these updates as `will not merge: actions.lock`.
 
 If a merge fails, the tool continues with the remaining pull requests. After the batch, interactive runs offer to post `@dependabot rebase` for pull requests that still have merge conflicts. Non-interactive runs print instructions instead. A rebase request does not merge the pull request; run the tool again after Dependabot updates it and CI completes. The command exits with an error if any merge failed.
 
