@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+## [0.1.9](https://github.com/robjtede/dependabot-reviewer/compare/v0.1.8...v0.1.9) - 2026-09-25
+
+### Fixed
+
+- mark actions.lock PRs as unmergeable
+- skip Actions approvals and merges when actions.lock exists
+
+### Other
+
+- *(deps)* bump clap from 4.6.6 to 4.6.7
+
 ## [0.1.8](https://github.com/robjtede/dependabot-reviewer/compare/v0.1.7...v0.1.8) - 2026-09-17
 
 ### Fixed
