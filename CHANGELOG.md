@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+## [0.1.10](https://github.com/robjtede/dependabot-reviewer/compare/v0.1.9...v0.1.10) - 2026-10-02
+
+### Added
+
+- offer to clear notifications for processed PRs ([#88](https://github.com/robjtede/dependabot-reviewer/pull/88))
+- add configuration editor option ([#89](https://github.com/robjtede/dependabot-reviewer/pull/89))
+
 ## [0.1.9](https://github.com/robjtede/dependabot-reviewer/compare/v0.1.8...v0.1.9) - 2026-10-02
 
 ### Added
