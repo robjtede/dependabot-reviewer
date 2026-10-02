@@ -62,11 +62,11 @@ Use `--action close` to close selected pull requests. Add `--dry-run` to preview
 
 Approval and merge skip GitHub Actions updates when the target branch contains `.github/workflows/actions.lock`. Dependabot cannot update this lockfile. This guard also applies to grouped updates, dry runs, and `--allow-non-passing-ci`. Other dependency types are not affected. If the lockfile check fails, approval and merge stop. The pull request list marks these updates as `will not merge: actions.lock`.
 
-Approval and merge wait until GitHub confirms that a pull request has merged or entered the merge queue. Queue insertion does not mean that the pull request has merged. Auto-merge remains available while required checks complete.
+The merge results screen polls GitHub until each pull request merges or fails. It shows when a pull request is merging, waiting for CI, in the merge queue (with its position and queue check status), or blocked by merge requirements. Queued pull requests and pull requests with auto-merge enabled stay on the screen until GitHub confirms the merge.
 
-If GitHub confirms that a merge failed, the tool continues with the remaining pull requests. If a merge result cannot be confirmed within two minutes, or the result cannot be fetched, the tool skips the remaining pull requests in the batch. GitHub can still complete the request. Check the pull request status before trying again.
+Press Ctrl+C to stop waiting at any time. This does not cancel requests already sent to GitHub, remove pull requests from the merge queue, or disable auto-merge. Any pull requests that have not yet been submitted are skipped. The tool retries temporary status fetch failures. If a direct merge result cannot be confirmed, it skips the remaining submissions. Check the pull request status before trying again.
 
-After the batch, interactive runs offer to post `@dependabot rebase` for pull requests that still have merge conflicts. Non-interactive runs print instructions instead. A rebase request does not merge the pull request; run the tool again after Dependabot updates it and CI completes. The command exits with an error if any merge failed or any pull request was skipped because a merge result was not confirmed.
+As failures arrive, interactive runs offer to post `@dependabot rebase` for pull requests that still have merge conflicts. Non-interactive runs print instructions instead. A rebase request does not merge the pull request; run the tool again after Dependabot updates it and CI completes. The command exits with an error if any merge failed or any pull request was skipped because a merge result was not confirmed. Stopping the wait with Ctrl+C is not a merge failure.
 
 Run `dependabot-reviewer --help` to see all options.
 

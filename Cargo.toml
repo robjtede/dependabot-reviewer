@@ -44,6 +44,9 @@ features = [
   "tracing",
 ]
 
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }
+
 [lints.clippy]
 # Prevent panics and placeholder code in the command path.
 string_slice = "warn"

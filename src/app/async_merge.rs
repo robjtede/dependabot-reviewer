@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use derive_more::Display;
 use error_stack::{Report, ResultExt as _};
 use http::{HeaderValue, Method, Request, StatusCode};
@@ -31,59 +29,57 @@ pub(crate) enum MergeOutcome {
     Enqueued,
 }
 
+#[derive(Debug)]
+pub(crate) enum MergeStatus {
+    Pending(PendingMergeRequest),
+    Complete(MergeOutcome),
+}
+
+#[derive(Debug)]
+pub(crate) struct PendingMergeRequest {
+    route: String,
+    uuid: String,
+    options: MergeRequest,
+}
+
+impl PendingMergeRequest {
+    pub(crate) fn progress_message(&self) -> &'static str {
+        match self.options.merge_action {
+            "merge_queue" => "Joining merge queue",
+            _ => "Merging",
+        }
+    }
+}
+
 pub(crate) struct AsyncMerge<'a> {
     octocrab: &'a Octocrab,
-    poll_interval: Duration,
-    wait_timeout: Duration,
 }
 
 impl<'a> AsyncMerge<'a> {
     pub(crate) fn new(octocrab: &'a Octocrab) -> Self {
-        Self {
-            octocrab,
-            poll_interval: Duration::from_secs(2),
-            wait_timeout: Duration::from_secs(120),
-        }
+        Self { octocrab }
     }
 
-    pub(crate) async fn merge(
+    pub(crate) async fn start(
         &self,
         owner: &str,
         repo: &str,
         pr_number: u64,
         sha: &str,
         operation: MergeOperation,
-    ) -> Result<MergeOutcome, Report<AppError>> {
+    ) -> Result<MergeStatus, Report<AppError>> {
         let route = format!("/repos/{owner}/{repo}/pulls/{pr_number}/merge-async");
         let (merge_action, merge_method) = match operation {
             MergeOperation::Direct(method) => ("direct_merge", Some(rest_merge_method(method))),
             MergeOperation::Queue => ("merge_queue", None),
         };
-        let payload = MergeRequest {
-            sha,
+        let options = MergeRequest {
+            sha: sha.to_owned(),
             merge_action,
             merge_method,
             bypass_rules: false,
         };
-
-        tokio::time::timeout(self.wait_timeout, self.submit_and_wait(&route, &payload))
-            .await
-            .unwrap_or_else(|_| {
-                Err(Report::new(AsyncMergeError::Unconfirmed)
-                    .change_context(AppError::ApproveMerge)
-                    .attach(format!(
-                        "Merge result for PR #{pr_number} was not confirmed within {} seconds. Check the pull request before trying again.",
-                        self.wait_timeout.as_secs(),
-                    )))
-            })
-    }
-
-    async fn submit_and_wait(
-        &self,
-        route: &str,
-        payload: &MergeRequest<'_>,
-    ) -> Result<MergeOutcome, Report<AppError>> {
-        let request = self.build_request(Method::PUT, route, Some(payload))?;
+        let request = self.build_request(Method::PUT, &route, Some(&options))?;
         let response = self
             .octocrab
             .execute(request)
@@ -110,63 +106,56 @@ impl<'a> AsyncMerge<'a> {
             });
         }
 
-        let mut result = MergeResponse::from_response(response)
+        let result = MergeResponse::from_response(response)
             .await
             .change_context(AppError::ApproveMerge)
             .attach(AsyncMergeError::Unconfirmed)?;
-        let mut request_id = None;
 
-        loop {
-            match result {
-                MergeResponse::Merged {} => return Ok(MergeOutcome::Merged),
-                MergeResponse::Enqueued {} => return Ok(MergeOutcome::Enqueued),
-                MergeResponse::Failed { message } => {
-                    return Err(Report::new(AsyncMergeError::Failed { message })
-                        .change_context(AppError::ApproveMerge));
-                }
-                MergeResponse::Pending(details) => {
-                    if details.uuid.is_empty()
-                        || details.expected_head_sha != payload.sha
-                        || details.merge_action != payload.merge_action
-                        || details.bypass_rules
-                        || payload
-                            .merge_method
-                            .is_some_and(|method| details.merge_method.as_deref() != Some(method))
-                        || request_id.as_ref().is_some_and(|id| id != &details.uuid)
-                    {
-                        return Err(Report::new(AsyncMergeError::Unconfirmed)
-                            .change_context(AppError::ApproveMerge)
-                            .attach("A pending merge request has different options. Check the pull request before trying again."));
-                    }
+        match result {
+            MergeResponse::Pending(details) => {
+                validate_pending(&details, &options, None)?;
 
-                    let poll_route = format!("{route}/{}", details.uuid);
-                    request_id = Some(details.uuid);
-
-                    tokio::time::sleep(self.poll_interval).await;
-
-                    let request = self
-                        .build_request(Method::GET, &poll_route, None)
-                        .attach(AsyncMergeError::Unconfirmed)?;
-                    let response = self
-                        .octocrab
-                        .execute(request)
-                        .await
-                        .change_context(AppError::ApproveMerge)
-                        .attach(AsyncMergeError::Unconfirmed)?;
-                    let response = octocrab::map_github_error(response)
-                        .await
-                        .change_context(AppError::ApproveMerge)
-                        .attach(AsyncMergeError::Unconfirmed)
-                        .attach(format!(
-                            "Could not confirm the merge result at {poll_route}"
-                        ))?;
-
-                    result = MergeResponse::from_response(response)
-                        .await
-                        .change_context(AppError::ApproveMerge)
-                        .attach(AsyncMergeError::Unconfirmed)?;
-                }
+                Ok(MergeStatus::Pending(PendingMergeRequest {
+                    route,
+                    uuid: details.uuid,
+                    options,
+                }))
             }
+            result => completed_result(result).map(MergeStatus::Complete),
+        }
+    }
+
+    pub(crate) async fn poll(
+        &self,
+        pending: &PendingMergeRequest,
+    ) -> Result<Option<MergeOutcome>, Report<AppError>> {
+        let route = format!("{}/{}", pending.route, pending.uuid);
+        let request = self
+            .build_request(Method::GET, &route, None)
+            .attach(AsyncMergeError::Unconfirmed)?;
+        let response = self
+            .octocrab
+            .execute(request)
+            .await
+            .change_context(AppError::ApproveMerge)
+            .attach(AsyncMergeError::Unconfirmed)?;
+        let response = octocrab::map_github_error(response)
+            .await
+            .change_context(AppError::ApproveMerge)
+            .attach(AsyncMergeError::Unconfirmed)
+            .attach(format!("Could not confirm the merge result at {route}"))?;
+        let result = MergeResponse::from_response(response)
+            .await
+            .change_context(AppError::ApproveMerge)
+            .attach(AsyncMergeError::Unconfirmed)?;
+
+        match result {
+            MergeResponse::Pending(details) => {
+                validate_pending(&details, &pending.options, Some(&pending.uuid))?;
+
+                Ok(None)
+            }
+            result => completed_result(result).map(Some),
         }
     }
 
@@ -174,7 +163,7 @@ impl<'a> AsyncMerge<'a> {
         &self,
         method: Method,
         route: &str,
-        payload: Option<&MergeRequest<'_>>,
+        payload: Option<&MergeRequest>,
     ) -> Result<Request<OctoBody>, Report<AppError>> {
         let mut request = self
             .octocrab
@@ -191,12 +180,12 @@ impl<'a> AsyncMerge<'a> {
     }
 }
 
-#[derive(Serialize)]
-struct MergeRequest<'a> {
-    sha: &'a str,
-    merge_action: &'a str,
+#[derive(Debug, Serialize)]
+struct MergeRequest {
+    sha: String,
+    merge_action: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
-    merge_method: Option<&'a str>,
+    merge_method: Option<&'static str>,
     bypass_rules: bool,
 }
 
@@ -218,74 +207,47 @@ struct PendingMerge {
     bypass_rules: bool,
 }
 
+fn validate_pending(
+    details: &PendingMerge,
+    options: &MergeRequest,
+    request_id: Option<&str>,
+) -> Result<(), Report<AppError>> {
+    if details.uuid.is_empty()
+        || details.expected_head_sha != options.sha
+        || details.merge_action != options.merge_action
+        || details.bypass_rules
+        || options
+            .merge_method
+            .is_some_and(|method| details.merge_method.as_deref() != Some(method))
+        || request_id.is_some_and(|id| id != details.uuid)
+    {
+        return Err(Report::new(AsyncMergeError::Unconfirmed)
+            .change_context(AppError::ApproveMerge)
+            .attach("A pending merge request has different options. Check the pull request before trying again."));
+    }
+
+    Ok(())
+}
+
+fn completed_result(result: MergeResponse) -> Result<MergeOutcome, Report<AppError>> {
+    match result {
+        MergeResponse::Merged {} => Ok(MergeOutcome::Merged),
+        MergeResponse::Enqueued {} => Ok(MergeOutcome::Enqueued),
+        MergeResponse::Failed { message } => {
+            Err(Report::new(AsyncMergeError::Failed { message })
+                .change_context(AppError::ApproveMerge))
+        }
+        MergeResponse::Pending(_) => {
+            Err(Report::new(AsyncMergeError::Unconfirmed).change_context(AppError::ApproveMerge))
+        }
+    }
+}
+
 fn rest_merge_method(method: MergeMethod) -> &'static str {
     match method {
         MergeMethod::Merge => "merge",
         MergeMethod::Squash => "squash",
         MergeMethod::Rebase => "rebase",
         _ => "merge",
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use tokio::{
-        io::{AsyncReadExt as _, AsyncWriteExt as _},
-        net::TcpListener,
-    };
-
-    use super::*;
-
-    #[tokio::test]
-    async fn timeout_leaves_the_merge_result_unconfirmed() {
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("test listener");
-        let address = listener.local_addr().expect("test address");
-        let server = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.expect("merge request");
-            let mut buffer = [0; 4096];
-
-            assert_ne!(
-                socket.read(&mut buffer).await.expect("read merge request"),
-                0,
-            );
-
-            let body = r#"{"status":"pending","details":{"uuid":"request-id","merge_method":"merge","merge_action":"direct_merge","expected_head_sha":"head","bypass_rules":false}}"#;
-            let response = format!("HTTP/1.1 202 Accepted\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
-
-            socket
-                .write_all(response.as_bytes())
-                .await
-                .expect("pending response");
-        });
-        let octocrab = Octocrab::builder()
-            .base_uri(format!("http://{address}"))
-            .expect("test URI")
-            .build()
-            .expect("test client");
-        let merge = AsyncMerge {
-            octocrab: &octocrab,
-            poll_interval: Duration::from_secs(2),
-            wait_timeout: Duration::from_millis(100),
-        };
-
-        let error = merge
-            .merge(
-                "example",
-                "repo",
-                12,
-                "head",
-                MergeOperation::Direct(MergeMethod::Merge),
-            )
-            .await
-            .expect_err("merge deadline");
-
-        assert!(matches!(
-            error.downcast_ref::<AsyncMergeError>(),
-            Some(AsyncMergeError::Unconfirmed)
-        ));
-        assert!(format!("{error:?}").contains("was not confirmed within"));
-        server.await.expect("test server");
     }
 }

@@ -2,6 +2,7 @@ mod approval_workflow;
 mod async_merge;
 mod fetch;
 mod interactive;
+mod merge_results;
 mod process;
 mod state;
 

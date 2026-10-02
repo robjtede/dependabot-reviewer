@@ -1,4 +1,10 @@
-use std::{collections::HashMap, io::IsTerminal as _, process::Command, time::Duration};
+use std::{
+    collections::HashMap,
+    future::Future,
+    io::{self, IsTerminal as _},
+    process::Command,
+    time::Duration,
+};
 
 use console::style;
 use derive_more::Display;
@@ -16,6 +22,10 @@ use serde::{Deserialize, Serialize};
 use super::{
     approval_workflow::{ApprovalMode, ApprovalWorkflow, MergeQueueStatus},
     async_merge::{AsyncMerge, AsyncMergeError, MergeOperation, MergeOutcome},
+    merge_results::{
+        fetch_merge_progress, monitor_submitted_merges, wait_for_async_merge, MergeProgress,
+        MergeWaitCancelled,
+    },
     state::ReviewState,
     App,
 };
@@ -115,6 +125,10 @@ impl PrStatusRows {
         println!();
     }
 
+    fn suspend<T>(&self, callback: impl FnOnce() -> T) -> T {
+        self._multi_progress.suspend(callback)
+    }
+
     fn message(repo: &str, pr_number: u64, status: &str) -> String {
         format!("{repo}#{pr_number}: {status}")
     }
@@ -139,8 +153,12 @@ enum EnqueuePullRequestOutcome {
 }
 
 #[derive(Debug, Display)]
-#[display("Skipped because an earlier merge result is not confirmed. Check the pull request before trying again.")]
-struct MergeSkipped;
+enum MergeSkipped {
+    #[display("Skipped because an earlier merge result is not confirmed. Check the pull request before trying again.")]
+    Unconfirmed,
+    #[display("Skipped because waiting for merge results was cancelled")]
+    Cancelled,
+}
 
 #[derive(Clone, Copy)]
 enum PromptChoice {
@@ -831,6 +849,15 @@ impl App {
                     }
                 }
 
+                let show_wait_hint = || {
+                    println!("Waiting for merge results. Press Ctrl+C to stop waiting. GitHub can still process submitted requests.")
+                };
+                if let Some(statuses) = &pr_statuses {
+                    statuses.suspend(show_wait_hint);
+                } else {
+                    show_wait_hint();
+                }
+
                 if !self.cli.verbose && pr_statuses.is_none() {
                     pr_statuses = PrStatusRows::new(
                         merge_infos
@@ -839,153 +866,88 @@ impl App {
                     );
                 }
 
-                // Merges must run sequentially: each merge modifies the base branch,
-                // which invalidates the head SHA of subsequent PRs. Running them in
-                // parallel causes "Base branch was modified" errors.
-                merge_failures = process_merge_batch(&merge_infos, async |info| {
-                    if let Some(statuses) = &pr_statuses {
-                        statuses.update(&info.repo, info.pr_number, "Inspecting merge strategy");
-                    }
-                    let (merge_method, allow_auto_merge) = approve_merge_context
-                        .as_ref()
-                        .and_then(|contexts| contexts.get(&info.repo))
-                        .copied()
-                        .expect("approve merge context");
-                    let queue_status = self
-                        .fetch_merge_queue_status(
-                            &info.owner,
-                            &info.repo_name,
-                            info.pr_number,
-                            &info.base_ref_name,
-                        )
-                        .await
-                        .change_context(AppError::ApproveMerge)
-                        .attach(format!(
-                            "Failed to inspect merge strategy for PR #{}",
-                            info.pr_number
-                        ))?;
+                // Submit direct merges in order because each merge changes the base
+                // branch. Watch queued PRs while the remaining submissions run.
+                let (pending_tx, pending_rx) = tokio::sync::mpsc::unbounded_channel();
 
-                    let merge_mode = ApprovalWorkflow::plan(
-                        info.ci_status,
-                        &queue_status,
-                        allow_auto_merge,
-                        allow_non_passing_ci,
-                    );
-
-                    if !(matches!(merge_mode, ApprovalMode::AlreadyQueued)
-                        || matches!(merge_mode, ApprovalMode::AlreadyAutoMergeEnabled)
-                            && queue_status.uses_merge_queue)
-                    {
-                        if let Some(statuses) = &pr_statuses {
-                            statuses.update(&info.repo, info.pr_number, "Approving pull request");
-                        }
-                        self.approve_pull_request(&info.owner, &info.repo_name, info.pr_number)
-                            .await?;
-                    }
-
-                    match merge_mode {
-                        ApprovalMode::Direct => {
-                            self.debug(&format!("PR #{} merge queue: not used", info.pr_number));
+                let submit_merges = async {
+                    let failures = process_merge_batch(
+                        &merge_infos,
+                        async |info| {
+                            let mut watch_for_merge = false;
                             if let Some(statuses) = &pr_statuses {
-                                statuses.update(&info.repo, info.pr_number, "Merging");
+                                statuses.update(&info.repo, info.pr_number, "Inspecting merge strategy");
                             }
-                            self.direct_merge_pull_request(
-                                &info.owner,
-                                &info.repo_name,
-                                info.pr_number,
-                                merge_method,
-                            )
-                            .await?;
-                            if let Some(statuses) = &pr_statuses {
-                                statuses.finish_success(
-                                    &info.repo,
-                                    info.pr_number,
-                                    "Approved and merged",
-                                );
-                            } else {
-                                println!(
-                                    "  {} Approved and merged PR #{}{}",
-                                    style("✓").green(),
-                                    info.pr_number,
-                                    style(format!(" ({})", info.repo)).dim()
-                                );
-                            }
-                        }
-                        ApprovalMode::AutoMerge => {
-                            self.debug(&format!(
-                                "PR #{} merge queue: not used (enable regular auto-merge)",
-                                info.pr_number
-                            ));
-                            self.enable_auto_merge_for_pull_request(
-                                &queue_status.pull_request_id,
-                                &queue_status.head_oid,
-                                merge_method,
-                            )
-                            .await?;
-                            if let Some(statuses) = &pr_statuses {
-                                statuses.finish_success(
-                                    &info.repo,
-                                    info.pr_number,
-                                    "Approved; auto-merge enabled",
-                                );
-                            } else {
-                                println!(
-                                    "  {} Approved PR #{} and enabled auto-merge{}",
-                                    style("✓").green(),
-                                    info.pr_number,
-                                    style(format!(" ({})", info.repo)).dim()
-                                );
-                            }
-                        }
-                        ApprovalMode::MergeQueueEnqueue => {
-                            self.debug(&format!(
-                                "PR #{} merge queue: used (enqueue)",
-                                info.pr_number
-                            ));
-                            match self
-                                .enqueue_pull_request(
+                            let (merge_method, allow_auto_merge) = approve_merge_context
+                                .as_ref()
+                                .and_then(|contexts| contexts.get(&info.repo))
+                                .copied()
+                                .expect("approve merge context");
+                            let queue_status = self
+                                .fetch_merge_queue_status(
                                     &info.owner,
                                     &info.repo_name,
                                     info.pr_number,
-                                    &queue_status.head_oid,
+                                    &info.base_ref_name,
                                 )
-                                .await?
+                                .await
+                                .change_context(AppError::ApproveMerge)
+                                .attach(format!(
+                                    "Failed to inspect merge strategy for PR #{}",
+                                    info.pr_number
+                                ))?;
+
+                            let merge_mode = ApprovalWorkflow::plan(
+                                info.ci_status,
+                                &queue_status,
+                                allow_auto_merge,
+                                allow_non_passing_ci,
+                            );
+
+                            if !(matches!(merge_mode, ApprovalMode::AlreadyQueued)
+                                || matches!(merge_mode, ApprovalMode::AlreadyAutoMergeEnabled)
+                                    && queue_status.uses_merge_queue)
                             {
-                                EnqueuePullRequestOutcome::Queued => {
+                                if let Some(statuses) = &pr_statuses {
+                                    statuses.update(&info.repo, info.pr_number, "Approving pull request");
+                                }
+                                self.approve_pull_request(&info.owner, &info.repo_name, info.pr_number)
+                                    .await?;
+                            }
+
+                            match merge_mode {
+                                ApprovalMode::Direct => {
+                                    self.debug(&format!("PR #{} merge queue: not used", info.pr_number));
+                                    if let Some(statuses) = &pr_statuses {
+                                        statuses.update(&info.repo, info.pr_number, "Merging");
+                                    }
+                                    self.direct_merge_pull_request(
+                                        &info.owner,
+                                        &info.repo_name,
+                                        info.pr_number,
+                                        merge_method,
+                                        pr_statuses.as_ref(),
+                                    )
+                                    .await?;
                                     if let Some(statuses) = &pr_statuses {
                                         statuses.finish_success(
                                             &info.repo,
                                             info.pr_number,
-                                            "Approved; added to merge queue",
+                                            "Approved and merged",
                                         );
                                     } else {
                                         println!(
-                                            "  {} Approved PR #{} and added it to the merge queue{}",
+                                            "  {} Approved and merged PR #{}{}",
                                             style("✓").green(),
                                             info.pr_number,
                                             style(format!(" ({})", info.repo)).dim()
                                         );
                                     }
                                 }
-                                EnqueuePullRequestOutcome::Merged => {
-                                    if let Some(statuses) = &pr_statuses {
-                                        statuses.finish_success(
-                                            &info.repo,
-                                            info.pr_number,
-                                            "Already merged",
-                                        );
-                                    } else {
-                                        println!(
-                                            "  {} PR #{} is already merged{}",
-                                            style("✓").green(),
-                                            info.pr_number,
-                                            style(format!(" ({})", info.repo)).dim()
-                                        );
-                                    }
-                                }
-                                EnqueuePullRequestOutcome::AwaitingRequiredChecks => {
+                                ApprovalMode::AutoMerge => {
+                                    watch_for_merge = true;
                                     self.debug(&format!(
-                                        "PR #{} cannot enter the merge queue yet; enabling auto-merge",
+                                        "PR #{} merge queue: not used (enable regular auto-merge)",
                                         info.pr_number
                                     ));
                                     self.enable_auto_merge_for_pull_request(
@@ -995,167 +957,304 @@ impl App {
                                     )
                                     .await?;
                                     if let Some(statuses) = &pr_statuses {
-                                        statuses.finish_success(
+                                        statuses.update(
                                             &info.repo,
                                             info.pr_number,
-                                            "Approved; auto-merge enabled while checks complete",
+                                            "Waiting for CI to pass (auto-merge enabled)",
                                         );
                                     } else {
                                         println!(
-                                            "  {} Approved PR #{} and enabled auto-merge while required checks complete{}",
+                                            "  {} Approved PR #{} and enabled auto-merge{}",
                                             style("✓").green(),
                                             info.pr_number,
                                             style(format!(" ({})", info.repo)).dim()
                                         );
                                     }
                                 }
+                                ApprovalMode::MergeQueueEnqueue => {
+                                    self.debug(&format!(
+                                        "PR #{} merge queue: used (enqueue)",
+                                        info.pr_number
+                                    ));
+                                    match self
+                                        .enqueue_pull_request(
+                                            &info.owner,
+                                            &info.repo_name,
+                                            info.pr_number,
+                                            &queue_status.head_oid,
+                                            pr_statuses.as_ref(),
+                                        )
+                                        .await?
+                                    {
+                                        EnqueuePullRequestOutcome::Queued => {
+                                            watch_for_merge = true;
+                                            if let Some(statuses) = &pr_statuses {
+                                                statuses.update(
+                                                    &info.repo,
+                                                    info.pr_number,
+                                                    "In merge queue",
+                                                );
+                                            } else {
+                                                println!(
+                                                    "  {} Approved PR #{} and added it to the merge queue{}",
+                                                    style("✓").green(),
+                                                    info.pr_number,
+                                                    style(format!(" ({})", info.repo)).dim()
+                                                );
+                                            }
+                                        }
+                                        EnqueuePullRequestOutcome::Merged => {
+                                            if let Some(statuses) = &pr_statuses {
+                                                statuses.finish_success(
+                                                    &info.repo,
+                                                    info.pr_number,
+                                                    "Already merged",
+                                                );
+                                            } else {
+                                                println!(
+                                                    "  {} PR #{} is already merged{}",
+                                                    style("✓").green(),
+                                                    info.pr_number,
+                                                    style(format!(" ({})", info.repo)).dim()
+                                                );
+                                            }
+                                        }
+                                        EnqueuePullRequestOutcome::AwaitingRequiredChecks => {
+                                            watch_for_merge = true;
+                                            self.debug(&format!(
+                                                "PR #{} cannot enter the merge queue yet; enabling auto-merge",
+                                                info.pr_number
+                                            ));
+                                            self.enable_auto_merge_for_pull_request(
+                                                &queue_status.pull_request_id,
+                                                &queue_status.head_oid,
+                                                merge_method,
+                                            )
+                                            .await?;
+                                            if let Some(statuses) = &pr_statuses {
+                                                statuses.update(
+                                                    &info.repo,
+                                                    info.pr_number,
+                                                    "Waiting for CI to pass before joining merge queue",
+                                                );
+                                            } else {
+                                                println!(
+                                                    "  {} Approved PR #{} and enabled auto-merge while required checks complete{}",
+                                                    style("✓").green(),
+                                                    info.pr_number,
+                                                    style(format!(" ({})", info.repo)).dim()
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                                ApprovalMode::MergeQueueAutoMerge => {
+                                    watch_for_merge = true;
+                                    self.debug(&format!(
+                                        "PR #{} merge queue: used (auto-merge until queueable)",
+                                        info.pr_number
+                                    ));
+                                    self.enable_auto_merge_for_pull_request(
+                                        &queue_status.pull_request_id,
+                                        &queue_status.head_oid,
+                                        merge_method,
+                                    )
+                                    .await?;
+                                    if let Some(statuses) = &pr_statuses {
+                                        statuses.update(
+                                            &info.repo,
+                                            info.pr_number,
+                                            "Waiting for CI to pass before joining merge queue",
+                                        );
+                                    } else {
+                                        println!(
+                                            "  {} Approved PR #{} and enabled auto-merge for the merge queue{}",
+                                            style("✓").green(),
+                                            info.pr_number,
+                                            style(format!(" ({})", info.repo)).dim()
+                                        );
+                                    }
+                                }
+                                ApprovalMode::AlreadyQueued => {
+                                    watch_for_merge = true;
+                                    self.debug(&format!(
+                                        "PR #{} merge queue: already queued",
+                                        info.pr_number
+                                    ));
+                                    if let Some(statuses) = &pr_statuses {
+                                        statuses.update(
+                                            &info.repo,
+                                            info.pr_number,
+                                            "In merge queue",
+                                        );
+                                    } else {
+                                        println!(
+                                            "  {} Approved PR #{} (already in merge queue){}",
+                                            style("✓").green(),
+                                            info.pr_number,
+                                            style(format!(" ({})", info.repo)).dim()
+                                        );
+                                    }
+                                }
+                                ApprovalMode::AlreadyAutoMergeEnabled => {
+                                    watch_for_merge = true;
+                                    if queue_status.uses_merge_queue {
+                                        self.debug(&format!(
+                                            "PR #{} auto-merge: already enabled for merge queue",
+                                            info.pr_number
+                                        ));
+                                        if let Some(statuses) = &pr_statuses {
+                                            statuses.update(
+                                                &info.repo,
+                                                info.pr_number,
+                                                "Waiting for merge (auto-merge enabled)",
+                                            );
+                                        } else {
+                                            println!(
+                                                "  {} Approved PR #{} (auto-merge already enabled){}",
+                                                style("✓").green(),
+                                                info.pr_number,
+                                                style(format!(" ({})", info.repo)).dim()
+                                            );
+                                        }
+                                    } else {
+                                        self.debug(&format!(
+                                            "PR #{} auto-merge: already enabled (approval refreshed)",
+                                            info.pr_number
+                                        ));
+                                        if let Some(statuses) = &pr_statuses {
+                                            statuses.update(
+                                                &info.repo,
+                                                info.pr_number,
+                                                "Waiting for merge (auto-merge enabled)",
+                                            );
+                                        } else {
+                                            println!(
+                                                "  {} Approved PR #{} (auto-merge already enabled; approval refreshed){}",
+                                                style("✓").green(),
+                                                info.pr_number,
+                                                style(format!(" ({})", info.repo)).dim()
+                                            );
+                                        }
+                                    }
+                                }
+                                ApprovalMode::SkipPendingWithoutQueue => {
+                                    self.debug(&format!("PR #{} merge queue: not used", info.pr_number));
+                                    if let Some(statuses) = &pr_statuses {
+                                        statuses.finish_skipped(
+                                            &info.repo,
+                                            info.pr_number,
+                                            &format!("Skipped: CI {}, no merge queue", info.ci_status),
+                                        );
+                                    } else {
+                                        println!(
+                                            "  {} Skipping PR #{} (CI {}, no merge queue){}",
+                                            style("⊘").yellow(),
+                                            info.pr_number,
+                                            info.ci_status,
+                                            style(format!(" ({})", info.repo)).dim()
+                                        );
+                                    }
+                                    return Ok(());
+                                }
                             }
-                        }
-                        ApprovalMode::MergeQueueAutoMerge => {
-                            self.debug(&format!(
-                                "PR #{} merge queue: used (auto-merge until queueable)",
-                                info.pr_number
-                            ));
-                            self.enable_auto_merge_for_pull_request(
-                                &queue_status.pull_request_id,
-                                &queue_status.head_oid,
-                                merge_method,
+
+                            if watch_for_merge {
+                                pending_tx.send(info)
+                                    .map_err(|_closed| Report::new(AppError::ApproveMerge).attach(MergeWaitCancelled))?;
+                            }
+
+                            if let Some(dep_update) = &info.dep_update {
+                                review_state.record_approved(dep_update);
+                                state_changed = true;
+                            }
+
+                            performed_action = Some(action);
+
+                            Ok(())
+                        },
+                        async |info, error| {
+                            self.handle_merge_failure(info, error, pr_statuses.as_ref()).await
+                        },
+                        tokio::signal::ctrl_c(),
+                    ).await;
+
+                    // Save approvals while queued PRs continue to be monitored.
+                    if state_changed {
+                        review_state.save_to_path(&state_path)?;
+                        state_changed = false;
+
+                        let show_saved_state = || {
+                            println!(
+                                "  {} Updated review state at {}",
+                                style("✓").green(),
+                                style(state_path.as_str()).dim()
                             )
-                            .await?;
-                            if let Some(statuses) = &pr_statuses {
-                                statuses.finish_success(
-                                    &info.repo,
-                                    info.pr_number,
-                                    "Approved; merge-queue auto-merge enabled",
-                                );
-                            } else {
-                                println!(
-                                    "  {} Approved PR #{} and enabled auto-merge for the merge queue{}",
-                                    style("✓").green(),
-                                    info.pr_number,
-                                    style(format!(" ({})", info.repo)).dim()
-                                );
-                            }
-                        }
-                        ApprovalMode::AlreadyQueued => {
-                            self.debug(&format!(
-                                "PR #{} merge queue: already queued",
-                                info.pr_number
-                            ));
-                            if let Some(statuses) = &pr_statuses {
-                                statuses.finish_success(
-                                    &info.repo,
-                                    info.pr_number,
-                                    "Already in merge queue",
-                                );
-                            } else {
-                                println!(
-                                    "  {} Approved PR #{} (already in merge queue){}",
-                                    style("✓").green(),
-                                    info.pr_number,
-                                    style(format!(" ({})", info.repo)).dim()
-                                );
-                            }
-                        }
-                        ApprovalMode::AlreadyAutoMergeEnabled => {
-                            if queue_status.uses_merge_queue {
-                                self.debug(&format!(
-                                    "PR #{} auto-merge: already enabled for merge queue",
-                                    info.pr_number
-                                ));
-                                if let Some(statuses) = &pr_statuses {
-                                    statuses.finish_success(
-                                        &info.repo,
-                                        info.pr_number,
-                                        "Auto-merge already enabled",
-                                    );
-                                } else {
-                                    println!(
-                                        "  {} Approved PR #{} (auto-merge already enabled){}",
-                                        style("✓").green(),
-                                        info.pr_number,
-                                        style(format!(" ({})", info.repo)).dim()
-                                    );
-                                }
-                            } else {
-                                self.debug(&format!(
-                                    "PR #{} auto-merge: already enabled (approval refreshed)",
-                                    info.pr_number
-                                ));
-                                if let Some(statuses) = &pr_statuses {
-                                    statuses.finish_success(
-                                        &info.repo,
-                                        info.pr_number,
-                                        "Auto-merge already enabled; approval refreshed",
-                                    );
-                                } else {
-                                    println!(
-                                        "  {} Approved PR #{} (auto-merge already enabled; approval refreshed){}",
-                                        style("✓").green(),
-                                        info.pr_number,
-                                        style(format!(" ({})", info.repo)).dim()
-                                    );
-                                }
-                            }
-                        }
-                        ApprovalMode::SkipPendingWithoutQueue => {
-                            self.debug(&format!("PR #{} merge queue: not used", info.pr_number));
-                            if let Some(statuses) = &pr_statuses {
-                                statuses.finish_skipped(
-                                    &info.repo,
-                                    info.pr_number,
-                                    &format!("Skipped: CI {}, no merge queue", info.ci_status),
-                                );
-                            } else {
-                                println!(
-                                    "  {} Skipping PR #{} (CI {}, no merge queue){}",
-                                    style("⊘").yellow(),
-                                    info.pr_number,
-                                    info.ci_status,
-                                    style(format!(" ({})", info.repo)).dim()
-                                );
-                            }
-                            return Ok(());
-                        }
-                    }
-
-                    if let Some(dep_update) = &info.dep_update {
-                        review_state.record_approved(dep_update);
-                        state_changed = true;
-                    }
-
-                    performed_action = Some(action);
-
-                    Ok(())
-                })
-                .await;
-
-                for (info, error) in &merge_failures {
-                    if let Some(statuses) = &pr_statuses {
-                        if error.downcast_ref::<MergeSkipped>().is_some() {
-                            statuses.finish_skipped(
-                                &info.repo,
-                                info.pr_number,
-                                "Skipped: earlier merge result unconfirmed",
-                            );
-                        } else if matches!(
-                            error.downcast_ref::<AsyncMergeError>(),
-                            Some(AsyncMergeError::Unconfirmed)
-                        ) {
-                            statuses.complete(
-                                &info.repo,
-                                info.pr_number,
-                                "✗ Merge result unconfirmed; batch stopped",
-                            );
+                        };
+                        if let Some(statuses) = &pr_statuses {
+                            statuses.suspend(show_saved_state);
                         } else {
-                            statuses.complete(
-                                &info.repo,
-                                info.pr_number,
-                                "✗ Approval or merge failed",
-                            );
+                            show_saved_state();
                         }
                     }
+
+                    drop(pending_tx);
+                    Ok::<_, Report<AppError>>(failures)
+                };
+                let watch_merges = async {
+                    let submissions =
+                        futures_util::stream::unfold(pending_rx, async |mut receiver| {
+                            receiver.recv().await.map(|info| (info, receiver))
+                        });
+                    let results = monitor_submitted_merges(
+                        submissions,
+                        async |info| {
+                            fetch_merge_progress(
+                                &self.octocrab,
+                                &info.owner,
+                                &info.repo_name,
+                                info.pr_number,
+                            )
+                            .await
+                        },
+                        |info, progress| {
+                            if let Some(statuses) = &pr_statuses {
+                                if *progress == MergeProgress::Merged {
+                                    statuses.finish_success(
+                                        &info.repo,
+                                        info.pr_number,
+                                        progress.message(),
+                                    );
+                                } else {
+                                    statuses.update(&info.repo, info.pr_number, progress.message());
+                                }
+                            } else {
+                                println!(
+                                    "  {}#{}: {}",
+                                    info.repo,
+                                    info.pr_number,
+                                    progress.message()
+                                );
+                            }
+                        },
+                        async |info, error| {
+                            self.handle_merge_failure(info, error, pr_statuses.as_ref())
+                                .await
+                        },
+                        tokio::signal::ctrl_c(),
+                    )
+                    .await;
+
+                    Ok::<_, Report<AppError>>(results)
+                };
+                let (failures, results) = tokio::try_join!(submit_merges, watch_merges)?;
+                merge_failures = failures;
+
+                for info in results.cancelled {
+                    finish_cancelled_merge(info, pr_statuses.as_ref());
                 }
+
+                merge_failures.extend(results.failures);
             }
 
             if let Some(statuses) = pr_statuses.take() {
@@ -1171,6 +1270,14 @@ impl App {
                 );
             }
 
+            merge_failures.retain(|(_, error)| {
+                error.downcast_ref::<MergeWaitCancelled>().is_none()
+                    && !matches!(
+                        error.downcast_ref::<MergeSkipped>(),
+                        Some(MergeSkipped::Cancelled)
+                    )
+            });
+
             if !merge_failures.is_empty() {
                 let mut report = Report::new(AppError::ApproveMerge).attach(format!(
                     "{} of {} PR(s) failed or were skipped",
@@ -1179,41 +1286,6 @@ impl App {
                 ));
 
                 for (info, error) in merge_failures {
-                    let rebase_result = offer_conflict_rebase(&self.octocrab, info, &error, || {
-                        if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
-                            println!(
-                                "  {}#{} has merge conflicts. Comment `@dependabot rebase` on {} to request a rebase.",
-                                info.repo, info.pr_number, info.url
-                            );
-                            return Ok(false);
-                        }
-
-                        Confirm::with_theme(&ColorfulTheme::default())
-                            .with_prompt(format!(
-                                "{}#{} has merge conflicts. Post `@dependabot rebase`?",
-                                info.repo, info.pr_number
-                            ))
-                            .default(false)
-                            .interact()
-                            .change_context(AppError::Interactive)
-                            .attach("Rebase confirmation failed")
-                    })
-                    .await;
-
-                    let error = match rebase_result {
-                        Ok(true) => {
-                            println!(
-                                "  {} Rebase requested for {}#{}. Run the tool again after Dependabot updates the PR and CI completes.",
-                                style("✓").green(), info.repo, info.pr_number
-                            );
-                            error.attach("Dependabot rebase requested; PR is not merged")
-                        }
-                        Ok(false) => error,
-                        Err(rebase_error) => error.attach(format!(
-                            "Could not request a Dependabot rebase: {rebase_error:?}"
-                        )),
-                    };
-
                     report = report.attach(format!("{}#{}: {error:?}", info.repo, info.pr_number));
                 }
 
@@ -1332,84 +1404,126 @@ impl App {
         Ok(())
     }
 
+    async fn handle_merge_failure(
+        &self,
+        info: &MergeInfo,
+        error: Report<AppError>,
+        statuses: Option<&PrStatusRows>,
+    ) -> Report<AppError> {
+        if error.downcast_ref::<MergeWaitCancelled>().is_some() {
+            finish_cancelled_merge(info, statuses);
+            return error;
+        }
+
+        if let Some(skipped) = error.downcast_ref::<MergeSkipped>() {
+            let message = skipped.to_string();
+            if let Some(statuses) = statuses {
+                statuses.finish_skipped(&info.repo, info.pr_number, &message);
+            } else {
+                println!("  {}#{}: {message}", info.repo, info.pr_number);
+            }
+
+            return error;
+        }
+
+        let message = if matches!(
+            error.downcast_ref::<AsyncMergeError>(),
+            Some(AsyncMergeError::Unconfirmed)
+        ) {
+            "Merge result unconfirmed; check the pull request".to_owned()
+        } else if let Some(AsyncMergeError::Failed { message }) =
+            error.downcast_ref::<AsyncMergeError>()
+        {
+            format!("Merge failed: {message}")
+        } else {
+            "Approval or merge failed; check the pull request".to_owned()
+        };
+
+        if let Some(statuses) = statuses {
+            statuses.complete(&info.repo, info.pr_number, &format!("✗ {message}"));
+        } else {
+            println!("  {}#{}: {message}", info.repo, info.pr_number);
+        }
+
+        let rebase_result = offer_conflict_rebase(&self.octocrab, info, &error, || {
+            let prompt = || {
+                if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+                    println!("  {}#{} has merge conflicts. Comment `@dependabot rebase` on {} to request a rebase.", info.repo, info.pr_number, info.url);
+                    return Ok(false);
+                }
+
+                Confirm::with_theme(&ColorfulTheme::default())
+                    .with_prompt(format!("{}#{} has merge conflicts. Post `@dependabot rebase`?", info.repo, info.pr_number))
+                    .default(false)
+                    .interact()
+                    .change_context(AppError::Interactive)
+                    .attach("Rebase confirmation failed")
+            };
+
+            match statuses {
+                Some(statuses) => statuses.suspend(prompt),
+                None => prompt(),
+            }
+        }).await;
+
+        match rebase_result {
+            Ok(true) => {
+                if let Some(statuses) = statuses {
+                    statuses.complete(
+                        &info.repo,
+                        info.pr_number,
+                        "Rebase requested; run again after CI completes",
+                    );
+                } else {
+                    println!("  Rebase requested for {}#{}. Run the tool again after Dependabot updates the PR and CI completes.", info.repo, info.pr_number);
+                }
+
+                error.attach("Dependabot rebase requested; PR is not merged")
+            }
+            Ok(false) => error,
+            Err(rebase_error) => error.attach(format!(
+                "Could not request a Dependabot rebase: {rebase_error:?}"
+            )),
+        }
+    }
+
     async fn direct_merge_pull_request(
         &self,
         owner: &str,
         repo_name: &str,
         pr_number: u64,
         merge_method: MergeMethod,
+        statuses: Option<&PrStatusRows>,
     ) -> Result<(), Report<AppError>> {
-        const MAX_ATTEMPTS: u32 = 4;
-
-        for attempt in 1..=MAX_ATTEMPTS {
-            let pulls = self.octocrab.pulls(owner, repo_name);
-
-            let pr_data = pulls
-                .get(pr_number)
-                .await
-                .change_context(AppError::ApproveMerge)
-                .attach(format!("Failed to get PR #{}", pr_number))?;
-
-            let head_sha = pr_data.head.sha;
-
-            self.debug(&format!(
-                "Merging PR #{} using {:?} (head: {}, attempt {}/{})",
+        let pr_data = self
+            .octocrab
+            .pulls(owner, repo_name)
+            .get(pr_number)
+            .await
+            .change_context(AppError::ApproveMerge)
+            .attach(format!("Failed to get PR #{pr_number}"))?;
+        let status = AsyncMerge::new(&self.octocrab)
+            .start(
+                owner,
+                repo_name,
                 pr_number,
-                merge_method,
-                head_sha.get(..8).unwrap_or(&head_sha),
-                attempt,
-                MAX_ATTEMPTS
-            ));
+                &pr_data.head.sha,
+                MergeOperation::Direct(merge_method),
+            )
+            .await?;
+        let outcome = wait_for_async_merge(
+            &self.octocrab,
+            status,
+            |message| update_merge_status(statuses, owner, repo_name, pr_number, message),
+            tokio::signal::ctrl_c(),
+        )
+        .await?;
 
-            match AsyncMerge::new(&self.octocrab)
-                .merge(
-                    owner,
-                    repo_name,
-                    pr_number,
-                    &head_sha,
-                    MergeOperation::Direct(merge_method),
-                )
-                .await
-            {
-                Ok(MergeOutcome::Merged) => return Ok(()),
-                Ok(MergeOutcome::Enqueued) => {
-                    return Err(Report::new(AppError::ApproveMerge).attach(
-                        "Pull request is in the merge queue; direct merge is not complete",
-                    ));
-                }
-                Err(error)
-                    if matches!(
-                        error.downcast_ref::<AsyncMergeError>(),
-                        Some(AsyncMergeError::Unconfirmed)
-                    ) =>
-                {
-                    return Err(error);
-                }
-                Err(e) if attempt < MAX_ATTEMPTS => {
-                    let delay = Duration::from_secs(2u64.pow(attempt));
-                    self.debug(&format!(
-                        "Merge failed for PR #{}, retrying in {}s: {:?}",
-                        pr_number,
-                        delay.as_secs(),
-                        e
-                    ));
-                    tokio::time::sleep(delay).await;
-                }
-                Err(e) => {
-                    return Err(e)
-                        .change_context(AppError::ApproveMerge)
-                        .attach(format!(
-                            "Failed to merge PR #{} after {} attempts",
-                            pr_number, MAX_ATTEMPTS
-                        ));
-                }
-            }
+        match outcome {
+            MergeOutcome::Merged => Ok(()),
+            MergeOutcome::Enqueued => Err(Report::new(AppError::ApproveMerge)
+                .attach("Pull request is in the merge queue; direct merge is not complete")),
         }
-
-        Err(Report::new(AppError::ApproveMerge).attach(format!(
-            "Merge retry loop ended without merging PR #{} after {} attempts",
-            pr_number, MAX_ATTEMPTS
-        )))
     }
 
     async fn enqueue_pull_request(
@@ -1418,17 +1532,30 @@ impl App {
         repo_name: &str,
         pr_number: u64,
         expected_head_oid: &str,
+        statuses: Option<&PrStatusRows>,
     ) -> Result<EnqueuePullRequestOutcome, Report<AppError>> {
-        match AsyncMerge::new(&self.octocrab)
-            .merge(
-                owner,
-                repo_name,
-                pr_number,
-                expected_head_oid,
-                MergeOperation::Queue,
+        let result = async {
+            let status = AsyncMerge::new(&self.octocrab)
+                .start(
+                    owner,
+                    repo_name,
+                    pr_number,
+                    expected_head_oid,
+                    MergeOperation::Queue,
+                )
+                .await?;
+
+            wait_for_async_merge(
+                &self.octocrab,
+                status,
+                |message| update_merge_status(statuses, owner, repo_name, pr_number, message),
+                tokio::signal::ctrl_c(),
             )
             .await
-        {
+        }
+        .await;
+
+        match result {
             Ok(MergeOutcome::Enqueued) => Ok(EnqueuePullRequestOutcome::Queued),
             Ok(MergeOutcome::Merged) => Ok(EnqueuePullRequestOutcome::Merged),
             Err(error)
@@ -1594,33 +1721,73 @@ async fn offer_conflict_rebase(
     Ok(true)
 }
 
-async fn process_merge_batch<T>(
-    items: &[T],
-    mut process: impl AsyncFnMut(&T) -> Result<(), Report<AppError>>,
-) -> Vec<(&T, Report<AppError>)> {
+async fn process_merge_batch<'a, T>(
+    items: &'a [T],
+    mut process: impl AsyncFnMut(&'a T) -> Result<(), Report<AppError>>,
+    mut on_failure: impl AsyncFnMut(&'a T, Report<AppError>) -> Report<AppError>,
+    cancel: impl Future<Output = io::Result<()>>,
+) -> Vec<(&'a T, Report<AppError>)> {
     let mut failures = Vec::new();
-    let mut unconfirmed_merge = false;
+    let mut stopped = None;
+    tokio::pin!(cancel);
 
     for item in items {
-        if unconfirmed_merge {
-            failures.push((
-                item,
-                Report::new(AppError::ApproveMerge).attach(MergeSkipped),
-            ));
+        if let Some(cancelled) = stopped {
+            let reason = if cancelled {
+                MergeSkipped::Cancelled
+            } else {
+                MergeSkipped::Unconfirmed
+            };
+            let error = Report::new(AppError::ApproveMerge).attach(reason);
+            failures.push((item, on_failure(item, error).await));
 
             continue;
         }
 
-        if let Err(error) = process(item).await {
-            unconfirmed_merge = matches!(
+        let result = tokio::select! {
+            biased;
+            result = &mut cancel => Err(super::merge_results::cancelled(result)),
+            result = process(item) => result,
+        };
+
+        if let Err(error) = result {
+            if error.downcast_ref::<MergeWaitCancelled>().is_some() {
+                stopped = Some(true);
+            } else if matches!(
                 error.downcast_ref::<AsyncMergeError>(),
                 Some(AsyncMergeError::Unconfirmed)
-            );
-            failures.push((item, error));
+            ) {
+                stopped = Some(false);
+            }
+
+            failures.push((item, on_failure(item, error).await));
         }
     }
 
     failures
+}
+
+fn update_merge_status(
+    statuses: Option<&PrStatusRows>,
+    owner: &str,
+    repo: &str,
+    number: u64,
+    message: &str,
+) {
+    if let Some(statuses) = statuses {
+        statuses.update(&format!("{owner}/{repo}"), number, message);
+    } else {
+        println!("  {owner}/{repo}#{number}: {message}");
+    }
+}
+
+fn finish_cancelled_merge(info: &MergeInfo, statuses: Option<&PrStatusRows>) {
+    let message = "Stopped waiting; GitHub can still process the request";
+    if let Some(statuses) = statuses {
+        statuses.complete(&info.repo, info.pr_number, message);
+    } else {
+        println!("  {}#{}: {message}", info.repo, info.pr_number);
+    }
 }
 
 fn messages_are_awaiting_required_checks<'a>(messages: impl IntoIterator<Item = &'a str>) -> bool {
@@ -1753,7 +1920,7 @@ mod tests {
     use clap::Parser as _;
     use indicatif::TermLike;
 
-    use super::*;
+    use super::{super::merge_results::monitor_merge_results, *};
 
     #[derive(Clone, Debug, Default)]
     struct RecordingTerm {
@@ -1929,6 +2096,21 @@ mod tests {
         }
     }
 
+    async fn test_merge_request(
+        octocrab: &octocrab::Octocrab,
+        owner: &str,
+        repo: &str,
+        number: u64,
+        sha: &str,
+        operation: MergeOperation,
+    ) -> Result<MergeOutcome, Report<AppError>> {
+        let status = AsyncMerge::new(octocrab)
+            .start(owner, repo, number, sha, operation)
+            .await?;
+
+        wait_for_async_merge(octocrab, status, |_| {}, std::future::pending()).await
+    }
+
     fn pending_merge(method: &str, action: &str, sha: &str, bypass_rules: bool) -> String {
         format!(
             r#"{{"status":"pending","details":{{"uuid":"request-id","merge_method":"{method}","merge_action":"{action}","expected_head_sha":"{sha}","bypass_rules":{bypass_rules}}}}}"#
@@ -1952,7 +2134,7 @@ mod tests {
 
         tokio::time::timeout(
             Duration::from_secs(15),
-            app.direct_merge_pull_request("example", "repo", 12, MergeMethod::Squash),
+            app.direct_merge_pull_request("example", "repo", 12, MergeMethod::Squash, None),
         )
         .await
         .expect("merge completed within the test deadline")
@@ -1995,7 +2177,7 @@ mod tests {
         let app = merge_test_app(octocrab);
 
         let outcome = app
-            .enqueue_pull_request("example", "repo", 12, "head")
+            .enqueue_pull_request("example", "repo", 12, "head", None)
             .await
             .expect("queue insertion");
 
@@ -2023,7 +2205,7 @@ mod tests {
         let app = merge_test_app(octocrab);
 
         let outcome = app
-            .enqueue_pull_request("example", "repo", 12, "head")
+            .enqueue_pull_request("example", "repo", 12, "head", None)
             .await
             .expect("required checks result");
 
@@ -2051,7 +2233,7 @@ mod tests {
         let app = merge_test_app(octocrab);
 
         let outcome = app
-            .enqueue_pull_request("example", "repo", 12, "head")
+            .enqueue_pull_request("example", "repo", 12, "head", None)
             .await
             .expect("already merged");
 
@@ -2072,7 +2254,7 @@ mod tests {
         let app = merge_test_app(octocrab);
 
         let error = app
-            .direct_merge_pull_request("example", "repo", 12, MergeMethod::Merge)
+            .direct_merge_pull_request("example", "repo", 12, MergeMethod::Merge, None)
             .await
             .expect_err("queue insertion is not a completed direct merge");
 
@@ -2091,16 +2273,16 @@ mod tests {
         ])
         .await;
 
-        let outcome = AsyncMerge::new(&octocrab)
-            .merge(
-                "example",
-                "repo",
-                12,
-                "head",
-                MergeOperation::Direct(MergeMethod::Squash),
-            )
-            .await
-            .expect("existing merge completed");
+        let outcome = test_merge_request(
+            &octocrab,
+            "example",
+            "repo",
+            12,
+            "head",
+            MergeOperation::Direct(MergeMethod::Squash),
+        )
+        .await
+        .expect("existing merge completed");
 
         assert_eq!(outcome, MergeOutcome::Merged);
 
@@ -2114,6 +2296,147 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn submitting_an_async_merge_returns_before_polling() {
+        let (octocrab, server) = rebase_test_client(vec![(
+            202,
+            pending_merge("merge", "direct_merge", "head", false),
+        )])
+        .await;
+
+        let status = AsyncMerge::new(&octocrab)
+            .start(
+                "example",
+                "repo",
+                12,
+                "head",
+                MergeOperation::Direct(MergeMethod::Merge),
+            )
+            .await
+            .expect("accepted merge request");
+
+        assert_matches!(status, super::super::async_merge::MergeStatus::Pending(_));
+        assert_eq!(server.await.expect("test server").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn temporary_poll_errors_retry_without_resubmitting_the_merge() {
+        let (octocrab, server) = rebase_test_client(vec![
+            (202, pending_merge("merge", "direct_merge", "head", false)),
+            (503, r#"{"message":"Service unavailable"}"#.to_owned()),
+            (200, r#"{"status":"merged","details":{}}"#.to_owned()),
+        ])
+        .await;
+        let status = AsyncMerge::new(&octocrab)
+            .start(
+                "example",
+                "repo",
+                12,
+                "head",
+                MergeOperation::Direct(MergeMethod::Merge),
+            )
+            .await
+            .expect("accepted request");
+        let mut messages = Vec::new();
+
+        let outcome = wait_for_async_merge(
+            &octocrab,
+            status,
+            |message| messages.push(message.to_owned()),
+            std::future::pending(),
+        )
+        .await
+        .expect("confirmed merge");
+
+        assert_eq!(outcome, MergeOutcome::Merged);
+        assert_eq!(
+            messages,
+            [
+                "Merging",
+                "Status unavailable; retrying (Ctrl+C to stop waiting)"
+            ]
+        );
+
+        let requests = server.await.expect("test server");
+        assert_eq!(requests.len(), 3);
+        assert!(requests.iter().skip(1).all(|request| request
+            .starts_with("GET /repos/example/repo/pulls/12/merge-async/request-id ")));
+    }
+
+    #[tokio::test]
+    async fn cancelling_an_async_merge_only_stops_the_local_wait() {
+        let (octocrab, server) = rebase_test_client(vec![(
+            202,
+            pending_merge("merge", "merge_queue", "head", false),
+        )])
+        .await;
+        let status = AsyncMerge::new(&octocrab)
+            .start("example", "repo", 12, "head", MergeOperation::Queue)
+            .await
+            .expect("accepted request");
+
+        let error = wait_for_async_merge(&octocrab, status, |_| {}, async { Ok(()) })
+            .await
+            .expect_err("cancelled wait");
+
+        assert!(error.downcast_ref::<MergeWaitCancelled>().is_some());
+        assert_eq!(server.await.expect("test server").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn results_screen_polls_ci_queue_and_the_actual_merge() {
+        let snapshot = |state, ci, queue| {
+            format!(
+                r#"{{"data":{{"repository":{{"pullRequest":{{"state":"{state}","mergeable":"MERGEABLE","mergeStateStatus":"BLOCKED","mergeQueueEntry":{queue},"autoMergeRequest":{{"enabledAt":"2026-10-02T12:00:00Z"}},"commits":{{"nodes":[{{"commit":{{"statusCheckRollup":{{"state":"{ci}"}}}}}}]}}}}}}}}}}"#
+            )
+        };
+        let (octocrab, server) = rebase_test_client(vec![
+            (200, snapshot("OPEN", "PENDING", "null")),
+            (
+                200,
+                snapshot(
+                    "OPEN",
+                    "SUCCESS",
+                    r#"{"position":2,"state":"AWAITING_CHECKS"}"#,
+                ),
+            ),
+            (200, snapshot("MERGED", "SUCCESS", "null")),
+        ])
+        .await;
+        let info = merge_info();
+        let mut messages = Vec::new();
+
+        let results = monitor_merge_results(
+            &[&info],
+            async |info| {
+                fetch_merge_progress(&octocrab, &info.owner, &info.repo_name, info.pr_number).await
+            },
+            |_, progress| messages.push(progress.message().to_owned()),
+            async |_, error| error,
+            std::future::pending(),
+        )
+        .await;
+
+        assert!(results.failures.is_empty());
+        assert!(results.cancelled.is_empty());
+        assert_eq!(
+            messages,
+            [
+                "Waiting for CI to pass",
+                "In merge queue (position 2); waiting for queue CI to pass",
+                "Merged"
+            ]
+        );
+
+        let requests = server.await.expect("test server");
+        assert_eq!(requests.len(), 3);
+        assert!(requests
+            .iter()
+            .all(|request| request.starts_with("POST /graphql ")
+                && request.contains("statusCheckRollup")
+                && request.contains("mergeQueueEntry { position state }")));
+    }
+
+    #[tokio::test]
     async fn async_merge_rejects_existing_requests_with_different_options() {
         for (method, action, sha, bypass) in [
             ("merge", "direct_merge", "head", false),
@@ -2124,16 +2447,16 @@ mod tests {
             let (octocrab, server) =
                 rebase_test_client(vec![(409, pending_merge(method, action, sha, bypass))]).await;
 
-            let error = AsyncMerge::new(&octocrab)
-                .merge(
-                    "example",
-                    "repo",
-                    12,
-                    "head",
-                    MergeOperation::Direct(MergeMethod::Squash),
-                )
-                .await
-                .expect_err("different merge options");
+            let error = test_merge_request(
+                &octocrab,
+                "example",
+                "repo",
+                12,
+                "head",
+                MergeOperation::Direct(MergeMethod::Squash),
+            )
+            .await
+            .expect_err("different merge options");
 
             assert_matches!(
                 error.downcast_ref::<AsyncMergeError>(),
@@ -2148,13 +2471,13 @@ mod tests {
         let (octocrab, server) = rebase_test_client(vec![
             (200, conflicted_pr("true", "open")),
             (202, pending_merge("merge", "direct_merge", "head", false)),
-            (503, r#"{"message":"Service unavailable"}"#.to_owned()),
+            (403, r#"{"message":"Resource not accessible"}"#.to_owned()),
         ])
         .await;
         let app = merge_test_app(octocrab);
 
         let error = app
-            .direct_merge_pull_request("example", "repo", 12, MergeMethod::Merge)
+            .direct_merge_pull_request("example", "repo", 12, MergeMethod::Merge, None)
             .await
             .expect_err("unconfirmed merge result");
 
@@ -2162,7 +2485,7 @@ mod tests {
             error.downcast_ref::<AsyncMergeError>(),
             Some(AsyncMergeError::Unconfirmed)
         );
-        assert!(format!("{error:?}").contains("Service unavailable"));
+        assert!(format!("{error:?}").contains("Resource not accessible"));
         assert_eq!(server.await.expect("test server").len(), 3);
     }
 
@@ -2175,10 +2498,16 @@ mod tests {
         )])
         .await;
 
-        let error = AsyncMerge::new(&octocrab)
-            .merge("example", "repo", 12, "head", MergeOperation::Queue)
-            .await
-            .expect_err("draft pull request");
+        let error = test_merge_request(
+            &octocrab,
+            "example",
+            "repo",
+            12,
+            "head",
+            MergeOperation::Queue,
+        )
+        .await
+        .expect_err("draft pull request");
 
         assert_matches!(error.downcast_ref::<AsyncMergeError>(), Some(AsyncMergeError::Failed { message }) if message == "Pull request is still a draft");
         assert_eq!(server.await.expect("test server").len(), 1);
@@ -2198,7 +2527,7 @@ mod tests {
         let app = merge_test_app(octocrab);
 
         let error = app
-            .enqueue_pull_request("example", "repo", 12, "head")
+            .enqueue_pull_request("example", "repo", 12, "head", None)
             .await
             .expect_err("required review failure");
 
@@ -2218,16 +2547,16 @@ mod tests {
             (200, conflicted_pr("false", "open")),
         ])
         .await;
-        let error = AsyncMerge::new(&octocrab)
-            .merge(
-                "example",
-                "repo",
-                12,
-                "head",
-                MergeOperation::Direct(MergeMethod::Merge),
-            )
-            .await
-            .expect_err("merge conflicts");
+        let error = test_merge_request(
+            &octocrab,
+            "example",
+            "repo",
+            12,
+            "head",
+            MergeOperation::Direct(MergeMethod::Merge),
+        )
+        .await
+        .expect_err("merge conflicts");
         let mut prompted = false;
 
         let requested = offer_conflict_rebase(&octocrab, &merge_info(), &error, || {
@@ -2504,18 +2833,22 @@ mod tests {
         let mut completed = Vec::new();
         let prs = [1, 2, 3, 4];
 
-        let failures = process_merge_batch(&prs, async |pr| {
-            attempted.push(*pr);
+        let failures = process_merge_batch(
+            &prs,
+            async |pr| {
+                attempted.push(*pr);
 
-            if *pr == 2 || *pr == 4 {
-                return Err(
-                    Report::new(AppError::ApproveMerge).attach("Pull Request has merge conflicts")
-                );
-            }
+                if *pr == 2 || *pr == 4 {
+                    return Err(Report::new(AppError::ApproveMerge)
+                        .attach("Pull Request has merge conflicts"));
+                }
 
-            completed.push(*pr);
-            Ok(())
-        })
+                completed.push(*pr);
+                Ok(())
+            },
+            async |_, error| error,
+            std::future::pending(),
+        )
         .await;
 
         assert_eq!(attempted, [1, 2, 3, 4]);
@@ -2534,10 +2867,15 @@ mod tests {
         let mut completed = Vec::new();
         let prs = [1, 2];
 
-        let failures = process_merge_batch(&prs, async |pr| {
-            completed.push(*pr);
-            Ok(())
-        })
+        let failures = process_merge_batch(
+            &prs,
+            async |pr| {
+                completed.push(*pr);
+                Ok(())
+            },
+            async |_, error| error,
+            std::future::pending(),
+        )
         .await;
 
         assert_eq!(completed, prs);
@@ -2549,11 +2887,17 @@ mod tests {
         let mut attempted = Vec::new();
         let prs = [1, 2, 3];
 
-        let failures = process_merge_batch(&prs, async |pr| {
-            attempted.push(*pr);
+        let failures = process_merge_batch(
+            &prs,
+            async |pr| {
+                attempted.push(*pr);
 
-            Err(Report::new(AsyncMergeError::Unconfirmed).change_context(AppError::ApproveMerge))
-        })
+                Err(Report::new(AsyncMergeError::Unconfirmed)
+                    .change_context(AppError::ApproveMerge))
+            },
+            async |_, error| error,
+            std::future::pending(),
+        )
         .await;
 
         assert_eq!(attempted, [1]);
@@ -2588,6 +2932,86 @@ mod tests {
             "completed rows should remain in the status board"
         );
         assert_eq!(term.clear_count(), 0, "status rows should not be appended");
+    }
+
+    #[tokio::test]
+    async fn cancelling_the_batch_keeps_completed_merges_and_skips_new_submissions() {
+        let prs = [1, 2, 3];
+        let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+        let mut cancel_tx = Some(cancel_tx);
+        let mut attempted = Vec::new();
+
+        let failures = process_merge_batch(
+            &prs,
+            async |pr| {
+                attempted.push(*pr);
+                cancel_tx
+                    .take()
+                    .expect("one submission")
+                    .send(())
+                    .expect("cancel listener");
+                Ok(())
+            },
+            async |_, error| error,
+            async {
+                cancel_rx.await.expect("cancel sender");
+                Ok(())
+            },
+        )
+        .await;
+
+        assert_eq!(attempted, [1]);
+        assert_eq!(
+            failures.iter().map(|(pr, _)| **pr).collect::<Vec<_>>(),
+            [2, 3]
+        );
+        assert!(failures
+            .first()
+            .expect("cancelled item")
+            .1
+            .downcast_ref::<MergeWaitCancelled>()
+            .is_some());
+        assert_matches!(
+            failures
+                .last()
+                .expect("skipped item")
+                .1
+                .downcast_ref::<MergeSkipped>(),
+            Some(MergeSkipped::Cancelled)
+        );
+    }
+
+    #[tokio::test]
+    async fn merge_batch_offers_recovery_before_submitting_the_next_pull_request() {
+        use std::cell::RefCell;
+
+        let prs = [1, 2];
+        let events = RefCell::new(Vec::new());
+        let failures = process_merge_batch(
+            &prs,
+            async |pr| {
+                events.borrow_mut().push(format!("submit {pr}"));
+                if *pr == 1 {
+                    Err(super::super::merge_results::merge_failed(
+                        "Pull request has merge conflicts",
+                    ))
+                } else {
+                    Ok(())
+                }
+            },
+            async |pr, error| {
+                events.borrow_mut().push(format!("offer recovery {pr}"));
+                error
+            },
+            std::future::pending(),
+        )
+        .await;
+
+        assert_eq!(
+            *events.borrow(),
+            ["submit 1", "offer recovery 1", "submit 2"]
+        );
+        assert_eq!(failures.len(), 1);
     }
 
     #[test]
