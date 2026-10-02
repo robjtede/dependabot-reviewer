@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     future::Future,
     io::{self, IsTerminal as _},
     process::Command,
@@ -209,6 +209,7 @@ impl App {
     pub(crate) async fn process_repositories(
         &self,
         repos: &[String],
+        processed_pr_urls: &mut HashSet<String>,
     ) -> Result<Option<Action>, Report<AppError>> {
         let state_path = ReviewState::default_path()?;
         self.debug(&format!("Reading state from {}", state_path));
@@ -655,6 +656,7 @@ impl App {
                                 );
                             }
                             open_in_browser(&item.pr.url)?;
+                            processed_pr_urls.insert(item.pr.api_url.clone());
                             if let Some(statuses) = &pr_statuses {
                                 statuses.finish_success(&item.repo, pr_number, "Opened in browser");
                             } else {
@@ -1268,6 +1270,10 @@ impl App {
                     style("✓").green(),
                     style(state_path.as_str()).dim()
                 );
+            }
+
+            if !self.cli.dry_run && !matches!(action, Action::OpenUnreviewedInBrowser) {
+                processed_pr_urls.extend(review_items.into_iter().map(|item| item.pr.api_url));
             }
 
             merge_failures.retain(|(_, error)| {
@@ -3141,6 +3147,7 @@ mod tests {
                 number,
                 title: title.to_string(),
                 url: format!("https://github.com/example/repo/pull/{}", number),
+                api_url: format!("https://api.github.com/repos/example/repo/pulls/{number}"),
                 base_ref_name: "main".to_string(),
                 head_ref_name: "dependabot/cargo/tokio-1.1.0".to_string(),
                 ci_status,
