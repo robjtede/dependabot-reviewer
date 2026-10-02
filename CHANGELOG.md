@@ -32,7 +32,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Other
 
-- *(deps)* bump impl-more from 0.3.5 to 0.3.7 ([#66](https://github.com/robjtede/dependabot-reviewer/pull/66))
+- _(deps)_ bump impl-more from 0.3.5 to 0.3.7 ([#66](https://github.com/robjtede/dependabot-reviewer/pull/66))
 
 ## [0.1.5](https://github.com/robjtede/dependabot-reviewer/compare/v0.1.4...v0.1.5) - 2026-09-10
 
@@ -42,7 +42,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Other
 
-- *(deps)* bump toml from 1.1.4+spec-1.1.0 to 1.1.5+spec-1.1.0
+- _(deps)_ bump toml from 1.1.4+spec-1.1.0 to 1.1.5+spec-1.1.0
 
 ## [0.1.4](https://github.com/robjtede/dependabot-reviewer/compare/v0.1.3...v0.1.4) - 2026-08-18
 

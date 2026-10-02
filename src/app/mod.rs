@@ -1,4 +1,5 @@
 mod approval_workflow;
+mod async_merge;
 mod fetch;
 mod interactive;
 mod process;
