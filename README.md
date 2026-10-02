@@ -68,6 +68,8 @@ dependabot-reviewer --org owner --repo owner/repository --action approve-merge -
 
 Use `--action close` to close selected pull requests. Add `--dry-run` to preview the action first.
 
+After processing, interactive runs offer to remove GitHub notifications for the PRs in the processed batch by marking them as done. The default answer is **No**. If you accept, the tool attempts to remove all matching notifications, including read notifications. Cleanup failures are reported and do not change the PR action result. Dry runs and non-interactive runs do not remove notifications.
+
 Approval and merge skip GitHub Actions updates when the target branch contains `.github/workflows/actions.lock`. Dependabot cannot update this lockfile. This guard also applies to grouped updates, dry runs, and `--allow-non-passing-ci`. Other dependency types are not affected. If the lockfile check fails, approval and merge stop. The pull request list marks these updates as `will not merge: actions.lock`.
 
 The merge results screen polls GitHub until each pull request merges or fails. It shows when a pull request is merging, waiting for CI, in the merge queue (with its position and queue check status), or blocked by merge requirements. Queued pull requests and pull requests with auto-merge enabled stay on the screen until GitHub confirms the merge.

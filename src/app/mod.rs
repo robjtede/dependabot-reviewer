@@ -3,10 +3,12 @@ mod async_merge;
 mod fetch;
 mod interactive;
 mod merge_results;
+mod notifications;
 mod process;
 mod state;
 
 use std::{
+    collections::HashSet,
     env::{self, VarError},
     io::IsTerminal as _,
     process::Command,
@@ -206,7 +208,14 @@ impl App {
             }
         };
 
-        let performed_action = self.process_repositories(&selected_repos).await?;
+        let mut processed_pr_urls = HashSet::new();
+        let result = self
+            .process_repositories(&selected_repos, &mut processed_pr_urls)
+            .await;
+
+        self.offer_notification_cleanup(&processed_pr_urls).await;
+
+        let performed_action = result?;
 
         println!();
         println!("{}", style("Done!").green().bold());
