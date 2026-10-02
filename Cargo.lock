@@ -325,6 +325,7 @@ dependencies = [
  "error-stack",
  "futures-buffered",
  "futures-util",
+ "http",
  "impl-more",
  "indicatif",
  "octocrab",

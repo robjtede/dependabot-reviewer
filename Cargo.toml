@@ -21,6 +21,7 @@ dirs = "6"
 error-stack = "0.8"
 futures-buffered = "0.2"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
+http = "1"
 impl-more = "0.3"
 indicatif = "0.18"
 semver = "1"
@@ -42,6 +43,9 @@ features = [
   "timeout",
   "tracing",
 ]
+
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }
 
 [lints.clippy]
 # Prevent panics and placeholder code in the command path.

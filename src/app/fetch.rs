@@ -266,7 +266,7 @@ mod tests {
             while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
                 let count = socket.read(&mut buffer).await.expect("read request");
                 assert_ne!(count, 0, "request ended before headers");
-                request.extend_from_slice(&buffer[..count]);
+                request.extend_from_slice(buffer.get(..count).expect("received bytes"));
             }
 
             socket
