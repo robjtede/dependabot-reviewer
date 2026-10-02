@@ -2437,6 +2437,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn results_screen_keeps_fetch_errors_distinct_from_merge_failures() {
+        for (status, message, retryable) in [
+            (403, "API rate limit exceeded", true),
+            (403, "Resource not accessible", false),
+            (503, "Service unavailable", true),
+        ] {
+            let (octocrab, server) =
+                rebase_test_client(vec![(status, format!(r#"{{"message":"{message}"}}"#))]).await;
+
+            let error = fetch_merge_progress(&octocrab, "example", "repo", 12)
+                .await
+                .expect_err("unavailable status");
+
+            assert_matches!(
+                error.downcast_ref::<AsyncMergeError>(),
+                Some(AsyncMergeError::Unconfirmed)
+            );
+            assert_eq!(
+                super::super::merge_results::retryable_poll_error(&error),
+                retryable
+            );
+            assert_eq!(server.await.expect("test server").len(), 1);
+        }
+    }
+
+    #[tokio::test]
     async fn async_merge_rejects_existing_requests_with_different_options() {
         for (method, action, sha, bypass) in [
             ("merge", "direct_merge", "head", false),
