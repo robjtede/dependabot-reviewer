@@ -5,6 +5,9 @@ pub enum AppError {
     #[display("Failed to initialize application")]
     Initialization,
 
+    #[display("Failed to edit configuration")]
+    EditConfig,
+
     #[display("GitHub API error")]
     GitHubApi,
 

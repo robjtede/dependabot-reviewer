@@ -50,6 +50,37 @@ impl ReviewState {
         Ok(config_root.join(APP_CONFIG_DIR).join(STATE_FILE_NAME))
     }
 
+    pub(crate) fn create_default_at_path(path: &Utf8Path) -> Result<(), Report<AppError>> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .change_context(AppError::Initialization)
+                .attach_with(|| format!("Failed to create {}", parent))?;
+        }
+
+        let mut file = match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+        {
+            Ok(file) => file,
+            Err(err) if err.kind() == ErrorKind::AlreadyExists => return Ok(()),
+            Err(err) => {
+                return Err(Report::new(err)
+                    .change_context(AppError::Initialization)
+                    .attach(format!("Failed to create {}", path)));
+            }
+        };
+
+        let payload = toml::to_string_pretty(&Self::default())
+            .change_context(AppError::Initialization)
+            .attach("Failed to serialize reviewer state")?;
+        file.write_all(payload.as_bytes())
+            .change_context(AppError::Initialization)
+            .attach_with(|| format!("Failed to write {}", path))?;
+
+        Ok(())
+    }
+
     pub(crate) fn load_from_path(path: &Utf8Path) -> Result<Self, Report<AppError>> {
         match fs::read_to_string(path) {
             Ok(content) => toml::from_str::<Self>(&content)

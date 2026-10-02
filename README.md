@@ -44,6 +44,14 @@ dependabot-reviewer --org owner --save-default-orgs
 
 Then run `dependabot-reviewer` without `--org`. In non-interactive environments, set `GITHUB_TOKEN` or use `--use-gh-auth-token`.
 
+Edit the configuration file with your preferred editor:
+
+```sh
+EDITOR="code --wait" dependabot-reviewer --edit-config
+```
+
+This opens `state.toml` in the application's config directory, then exits. It creates a default file if none exists. GitHub authentication is not required. `EDITOR` can include arguments and quoted paths. If `EDITOR` is not set, the command prints a message and the configuration file path, then exits.
+
 ## Use
 
 Select an action interactively for the Dependabot pull requests in an organization:

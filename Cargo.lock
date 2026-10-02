@@ -332,6 +332,8 @@ dependencies = [
  "semver",
  "serde",
  "serde_urlencoded",
+ "shell-words",
+ "tempfile",
  "tokio",
  "toml",
 ]

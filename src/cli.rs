@@ -12,6 +12,10 @@ pub struct Cli {
     #[arg(long)]
     pub save_default_orgs: bool,
 
+    /// Edit the configuration file with $EDITOR, then exit.
+    #[arg(long, conflicts_with = "save_default_orgs")]
+    pub edit_config: bool,
+
     /// Specific repository to process (owner/repo).
     #[arg(short, long)]
     pub repo: Option<String>,
@@ -55,6 +59,20 @@ mod tests {
     use clap::Parser as _;
 
     use super::{Action, Cli};
+
+    #[test]
+    fn edit_config_conflicts_with_save_default_orgs() {
+        let error = Cli::try_parse_from([
+            "dependabot-reviewer",
+            "--edit-config",
+            "--org",
+            "example",
+            "--save-default-orgs",
+        ])
+        .expect_err("editing and saving config should conflict");
+
+        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
 
     #[test]
     fn parses_use_gh_auth_token() {
