@@ -6,7 +6,11 @@ mod merge_results;
 mod process;
 mod state;
 
-use std::{io::IsTerminal as _, process::Command};
+use std::{
+    env::{self, VarError},
+    io::IsTerminal as _,
+    process::Command,
+};
 
 use console::style;
 use dialoguer::{theme::ColorfulTheme, Confirm};
@@ -102,6 +106,47 @@ impl App {
         }
 
         Ok(token)
+    }
+
+    pub fn edit_config() -> Result<(), Report<AppError>> {
+        let state_path = ReviewState::default_path()?;
+        let editor = match env::var("EDITOR") {
+            Ok(editor) => editor,
+            Err(VarError::NotPresent) => {
+                println!("EDITOR is not set. Configuration file: {}", state_path);
+                return Ok(());
+            }
+            Err(err) => {
+                return Err(Report::new(err)
+                    .change_context(AppError::InvalidInput)
+                    .attach("EDITOR must contain valid UTF-8"));
+            }
+        };
+        let parts = shell_words::split(&editor)
+            .change_context(AppError::InvalidInput)
+            .attach("EDITOR contains invalid quoting")?;
+        let (program, args) = parts
+            .split_first()
+            .filter(|(program, _)| !program.is_empty())
+            .ok_or_else(|| Report::new(AppError::InvalidInput))
+            .attach("EDITOR must contain an editor command")?;
+
+        ReviewState::create_default_at_path(&state_path)?;
+
+        let status = Command::new(program)
+            .args(args)
+            .arg(&state_path)
+            .status()
+            .change_context(AppError::EditConfig)
+            .attach_with(|| format!("Failed to start editor: {}", editor))?;
+
+        if !status.success() {
+            return Err(
+                Report::new(AppError::EditConfig).attach(format!("Editor exited with {}", status))
+            );
+        }
+
+        Ok(())
     }
 
     pub fn update_default_orgs(orgs: Vec<String>) -> Result<(), Report<AppError>> {
@@ -204,6 +249,7 @@ mod tests {
         let app = App::new(Cli {
             org: Vec::new(),
             save_default_orgs: false,
+            edit_config: false,
             repo: Some("owner/repository".to_string()),
             confirm: false,
             dry_run: true,

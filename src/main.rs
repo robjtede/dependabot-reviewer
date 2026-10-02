@@ -12,6 +12,10 @@ use crate::{app::App, cli::Cli, error::AppError};
 async fn main() -> Result<(), Report<AppError>> {
     let cli = Cli::parse();
 
+    if cli.edit_config {
+        return App::edit_config();
+    }
+
     if cli.save_default_orgs {
         if cli.org.is_empty() {
             return Err(Report::new(AppError::InvalidInput)
