@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+## [0.1.11](https://github.com/robjtede/dependabot-reviewer/compare/v0.1.10...v0.1.11) - 2026-10-08
+
+### Other
+
+- Merge pull request #94 from robjtede/dependabot/cargo/tempfile-3.27.0
+- split pull request processing into modules
+
 ## [0.1.10](https://github.com/robjtede/dependabot-reviewer/compare/v0.1.9...v0.1.10) - 2026-10-02
 
 ### Added
