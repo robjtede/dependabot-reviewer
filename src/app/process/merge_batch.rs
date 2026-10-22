@@ -6,6 +6,7 @@ use std::{
 use derive_more::Display;
 use dialoguer::{theme::ColorfulTheme, Confirm};
 use error_stack::{Report, ResultExt as _};
+use octocrab::models::pulls::MergeableState;
 
 use super::{status_rows::PrStatusRows, App, MergeInfo};
 use crate::{
@@ -63,15 +64,21 @@ impl App {
             println!("  {}#{}: {message}", info.repo, info.pr_number);
         }
 
-        let rebase_result = offer_conflict_rebase(&self.octocrab, info, &error, || {
+        let rebase_result = offer_rebase(&self.octocrab, info, &error, || {
             let prompt = || {
                 if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
-                    println!("  {}#{} has merge conflicts. Comment `@dependabot rebase` on {} to request a rebase.", info.repo, info.pr_number, info.url);
+                    println!(
+                        "  {}#{} needs a rebase. Comment `@dependabot rebase` on {} to request it.",
+                        info.repo, info.pr_number, info.url
+                    );
                     return Ok(false);
                 }
 
                 Confirm::with_theme(&ColorfulTheme::default())
-                    .with_prompt(format!("{}#{} has merge conflicts. Post `@dependabot rebase`?", info.repo, info.pr_number))
+                    .with_prompt(format!(
+                        "{}#{} needs a rebase. Post `@dependabot rebase`?",
+                        info.repo, info.pr_number
+                    ))
                     .default(false)
                     .interact()
                     .change_context(AppError::Interactive)
@@ -82,7 +89,8 @@ impl App {
                 Some(statuses) => statuses.suspend(prompt),
                 None => prompt(),
             }
-        }).await;
+        })
+        .await;
 
         match rebase_result {
             Ok(true) => {
@@ -106,46 +114,52 @@ impl App {
     }
 }
 
-async fn offer_conflict_rebase(
+async fn offer_rebase(
     octocrab: &octocrab::Octocrab,
     info: &MergeInfo,
     error: &Report<AppError>,
     confirm: impl FnOnce() -> Result<bool, Report<AppError>>,
 ) -> Result<bool, Report<AppError>> {
-    let async_merge_conflicts = matches!(
+    let message_needs_rebase = |message: &str| {
+        let message = message.to_ascii_lowercase();
+
+        message.contains("merge conflict")
+            || message.contains("not mergeable")
+            || message.contains("out of date")
+    };
+    let async_merge_needs_rebase = matches!(
         error.downcast_ref::<AsyncMergeError>(),
-        Some(AsyncMergeError::Failed { message })
-            if message.to_ascii_lowercase().contains("merge conflict")
-                || message.to_ascii_lowercase().contains("not mergeable")
+        Some(AsyncMergeError::Failed { message }) if message_needs_rebase(message)
     );
-    let may_have_conflicts = async_merge_conflicts
+    let may_need_rebase = async_merge_needs_rebase
         || match error.downcast_ref::<octocrab::Error>() {
-            Some(octocrab::Error::GitHub { source, .. }) => source.status_code.as_u16() == 405,
-            Some(octocrab::Error::Graphql { source, .. }) => source.0.iter().any(|error| {
-                error
-                    .message
-                    .to_ascii_lowercase()
-                    .contains("merge conflict")
-            }),
+            Some(octocrab::Error::GitHub { source, .. }) => {
+                source.status_code.as_u16() == 405
+                    || (source.status_code.as_u16() == 409 && message_needs_rebase(&source.message))
+            }
+            Some(octocrab::Error::Graphql { source, .. }) => source
+                .0
+                .iter()
+                .any(|error| message_needs_rebase(&error.message)),
             _ => false,
         };
 
-    if !may_have_conflicts {
+    if !may_need_rebase {
         return Ok(false);
     }
 
-    // A rejected merge can also mean branch protection or an outdated head SHA.
-    // Confirm that the PR still has conflicts before offering a rebase.
+    // The branch can change after GitHub rejects the merge. Check its current
+    // state before offering a rebase.
     let pr = octocrab
         .pulls(&info.owner, &info.repo_name)
         .get(info.pr_number)
         .await
         .change_context(AppError::GitHubApi)
-        .attach("Failed to check current merge conflicts")?;
+        .attach("Failed to check whether the pull request needs a rebase")?;
 
     if pr.state != Some(octocrab::models::IssueState::Open)
         || pr.merged == Some(true)
-        || pr.mergeable != Some(false)
+        || (pr.mergeable != Some(false) && pr.mergeable_state != Some(MergeableState::Behind))
         || !confirm()?
     {
         return Ok(false);
@@ -225,6 +239,51 @@ mod tests {
     use super::*;
     use crate::app::{async_merge::MergeOperation, process::test_support::*};
 
+    fn mergeable_pr(mergeable_state: &str, state: &str, merged: bool) -> String {
+        format!(
+            r#"{{"id":1,"number":12,"url":"https://example.com/pr/12","head":{{"ref":"dependabot/test","sha":"head"}},"base":{{"ref":"main","sha":"base"}},"mergeable":true,"mergeable_state":"{mergeable_state}","state":"{state}","merged":{merged}}}"#
+        )
+    }
+
+    #[tokio::test]
+    async fn rebase_handles_outdated_async_merge_head() {
+        let (octocrab, server) = rebase_test_client(vec![
+            (202, pending_merge("merge", "direct_merge", "head", false)),
+            (
+                200,
+                r#"{"status":"failed","details":{"message":"Head branch is out of date. Review and try the merge again."}}"#
+                    .to_owned(),
+            ),
+            (200, mergeable_pr("behind", "open", false)),
+        ])
+        .await;
+        let error = test_merge_request(
+            &octocrab,
+            "example",
+            "repo",
+            12,
+            "head",
+            MergeOperation::Direct(MergeMethod::Merge),
+        )
+        .await
+        .expect_err("outdated head branch");
+
+        assert_matches!(error.downcast_ref::<AsyncMergeError>(), Some(AsyncMergeError::Failed { message }) if message == "Head branch is out of date. Review and try the merge again.");
+
+        let mut prompted = false;
+
+        let requested = offer_rebase(&octocrab, &merge_info(), &error, || {
+            prompted = true;
+            Ok(false)
+        })
+        .await
+        .expect("declined rebase");
+
+        assert!(prompted, "an outdated head branch should offer a rebase");
+        assert!(!requested);
+        assert_eq!(server.await.expect("test server").len(), 3);
+    }
+
     #[tokio::test]
     async fn conflict_rebase_handles_async_merge_failures() {
         let (octocrab, server) = rebase_test_client(vec![
@@ -249,7 +308,7 @@ mod tests {
         .expect_err("merge conflicts");
         let mut prompted = false;
 
-        let requested = offer_conflict_rebase(&octocrab, &merge_info(), &error, || {
+        let requested = offer_rebase(&octocrab, &merge_info(), &error, || {
             prompted = true;
             Ok(false)
         })
@@ -262,33 +321,93 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn conflict_rebase_posts_only_after_confirmation() {
-        let (octocrab, server) = rebase_test_client(vec![
-            (405, r#"{"message":"Pull Request is not mergeable"}"#.to_owned()),
-            (200, conflicted_pr("false", "open")),
-            (201, r#"{"id":1,"node_id":"comment","url":"https://example.com/comment","html_url":"https://example.com/comment","user":{"login":"tester","id":1,"node_id":"user","gravatar_id":"","type":"User","site_admin":false,"avatar_url":"https://example.com","url":"https://example.com","html_url":"https://example.com","followers_url":"https://example.com","following_url":"https://example.com","gists_url":"https://example.com","starred_url":"https://example.com","subscriptions_url":"https://example.com","organizations_url":"https://example.com","repos_url":"https://example.com","events_url":"https://example.com","received_events_url":"https://example.com"},"created_at":"2026-09-17T00:00:00Z","body":"@dependabot rebase"}"#.to_owned()),
-        ]).await;
-        let error = merge_test_error(&octocrab).await;
-        let mut prompted = false;
+    async fn rebase_posts_only_after_confirmation() {
+        for (status, message, pr) in [
+            (
+                405,
+                "Pull Request is not mergeable",
+                conflicted_pr("false", "open"),
+            ),
+            (
+                409,
+                "Head branch is out of date. Review and try the merge again.",
+                mergeable_pr("behind", "open", false),
+            ),
+        ] {
+            let (octocrab, server) = rebase_test_client(vec![
+                (status, format!(r#"{{"message":"{message}"}}"#)),
+                (200, pr),
+                (201, r#"{"id":1,"node_id":"comment","url":"https://example.com/comment","html_url":"https://example.com/comment","user":{"login":"tester","id":1,"node_id":"user","gravatar_id":"","type":"User","site_admin":false,"avatar_url":"https://example.com","url":"https://example.com","html_url":"https://example.com","followers_url":"https://example.com","following_url":"https://example.com","gists_url":"https://example.com","starred_url":"https://example.com","subscriptions_url":"https://example.com","organizations_url":"https://example.com","repos_url":"https://example.com","events_url":"https://example.com","received_events_url":"https://example.com"},"created_at":"2026-09-17T00:00:00Z","body":"@dependabot rebase"}"#.to_owned()),
+            ])
+            .await;
+            let error = merge_test_error(&octocrab).await;
+            let mut prompted = false;
 
-        let requested = offer_conflict_rebase(&octocrab, &merge_info(), &error, || {
-            prompted = true;
-            Ok(true)
-        })
-        .await
-        .expect("rebase request");
+            let requested = offer_rebase(&octocrab, &merge_info(), &error, || {
+                prompted = true;
+                Ok(true)
+            })
+            .await
+            .expect("rebase request");
 
-        assert!(requested, "conflicted PR should get a rebase request");
-        assert!(prompted);
-        let requests = server.await.expect("test server");
-        assert_eq!(requests.len(), 3);
-        assert!(requests
-            .get(1)
-            .expect("PR lookup")
-            .starts_with("GET /repos/example/repo/pulls/12 "));
-        let comment = requests.last().expect("comment request");
-        assert!(comment.starts_with("POST /repos/example/repo/issues/12/comments "));
-        assert!(comment.ends_with(r#"{"body":"@dependabot rebase"}"#));
+            assert!(requested, "PR should get a rebase request: {message}");
+            assert!(prompted);
+            let requests = server.await.expect("test server");
+            assert_eq!(requests.len(), 3);
+            assert!(requests
+                .get(1)
+                .expect("PR lookup")
+                .starts_with("GET /repos/example/repo/pulls/12 "));
+            let comment = requests.last().expect("comment request");
+            assert!(comment.starts_with("POST /repos/example/repo/issues/12/comments "));
+            assert!(comment.ends_with(r#"{"body":"@dependabot rebase"}"#));
+        }
+    }
+
+    #[tokio::test]
+    async fn outdated_rebase_requires_a_current_open_unmerged_behind_branch() {
+        for (mergeable_state, state, merged) in [
+            ("clean", "open", false),
+            ("blocked", "open", false),
+            ("unknown", "open", false),
+            ("behind", "closed", false),
+            ("behind", "open", true),
+        ] {
+            let (octocrab, server) = rebase_test_client(vec![
+                (
+                    400,
+                    r#"{"status":"failed","details":{"message":"Head branch is out of date. Review and try the merge again."}}"#
+                        .to_owned(),
+                ),
+                (200, mergeable_pr(mergeable_state, state, merged)),
+            ])
+            .await;
+            let error = test_merge_request(
+                &octocrab,
+                "example",
+                "repo",
+                12,
+                "head",
+                MergeOperation::Direct(MergeMethod::Merge),
+            )
+            .await
+            .expect_err("outdated head branch");
+            let mut prompted = false;
+
+            let requested = offer_rebase(&octocrab, &merge_info(), &error, || {
+                prompted = true;
+                Ok(true)
+            })
+            .await
+            .expect("ineligible PR");
+
+            assert!(!requested);
+            assert!(
+                !prompted,
+                "mergeable_state={mergeable_state}, state={state}, merged={merged}"
+            );
+            assert_eq!(server.await.expect("test server").len(), 2);
+        }
     }
 
     #[tokio::test]
@@ -304,7 +423,7 @@ mod tests {
         let error = merge_test_error(&octocrab).await;
         let mut prompted = false;
 
-        let requested = offer_conflict_rebase(&octocrab, &merge_info(), &error, || {
+        let requested = offer_rebase(&octocrab, &merge_info(), &error, || {
             prompted = true;
             Ok(false)
         })
@@ -330,7 +449,7 @@ mod tests {
             let error = merge_test_error(&octocrab).await;
             let mut prompted = false;
 
-            let requested = offer_conflict_rebase(&octocrab, &merge_info(), &error, || {
+            let requested = offer_rebase(&octocrab, &merge_info(), &error, || {
                 prompted = true;
                 Ok(true)
             })
@@ -354,7 +473,7 @@ mod tests {
             let error = merge_test_error(&octocrab).await;
             let mut prompted = false;
 
-            let requested = offer_conflict_rebase(&octocrab, &merge_info(), &error, || {
+            let requested = offer_rebase(&octocrab, &merge_info(), &error, || {
                 prompted = true;
                 Ok(true)
             })
@@ -368,38 +487,46 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn conflict_rebase_handles_graphql_merge_conflicts() {
+    async fn rebase_handles_graphql_branch_update_errors() {
         #[derive(serde::Serialize)]
         struct GraphqlRequest<'a> {
             query: &'a str,
             variables: (),
         }
 
-        let (octocrab, server) = rebase_test_client(vec![
+        for (message, pr) in [
             (
-                200,
-                r#"{"errors":[{"message":"Pull Request has merge conflicts"}]}"#.to_owned(),
+                "Pull Request has merge conflicts",
+                conflicted_pr("false", "open"),
             ),
-            (200, conflicted_pr("false", "open")),
-        ])
-        .await;
-        let error = octocrab.graphql::<()>(&GraphqlRequest {
-            query: "mutation { enqueuePullRequest(input: {pullRequestId: \"test\"}) { mergeQueueEntry { id } } }",
-            variables: (),
-        }).await.expect_err("GraphQL conflict");
-        let error = Report::new(error).change_context(AppError::ApproveMerge);
-        let mut prompted = false;
+            (
+                "Head branch is out of date. Review and try the merge again.",
+                mergeable_pr("behind", "open", false),
+            ),
+        ] {
+            let (octocrab, server) = rebase_test_client(vec![
+                (200, format!(r#"{{"errors":[{{"message":"{message}"}}]}}"#)),
+                (200, pr),
+            ])
+            .await;
+            let error = octocrab.graphql::<()>(&GraphqlRequest {
+                query: "mutation { enqueuePullRequest(input: {pullRequestId: \"test\"}) { mergeQueueEntry { id } } }",
+                variables: (),
+            }).await.expect_err("GraphQL merge failure");
+            let error = Report::new(error).change_context(AppError::ApproveMerge);
+            let mut prompted = false;
 
-        let requested = offer_conflict_rebase(&octocrab, &merge_info(), &error, || {
-            prompted = true;
-            Ok(false)
-        })
-        .await
-        .expect("declined rebase");
+            let requested = offer_rebase(&octocrab, &merge_info(), &error, || {
+                prompted = true;
+                Ok(false)
+            })
+            .await
+            .expect("declined rebase");
 
-        assert!(prompted);
-        assert!(!requested);
-        assert_eq!(server.await.expect("test server").len(), 2);
+            assert!(prompted);
+            assert!(!requested);
+            assert_eq!(server.await.expect("test server").len(), 2);
+        }
     }
 
     #[tokio::test]
@@ -415,7 +542,7 @@ mod tests {
         .await;
         let error = merge_test_error(&octocrab).await;
 
-        let error = offer_conflict_rebase(&octocrab, &merge_info(), &error, || Ok(true))
+        let error = offer_rebase(&octocrab, &merge_info(), &error, || Ok(true))
             .await
             .expect_err("failed comment");
 
