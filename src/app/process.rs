@@ -7,11 +7,7 @@ mod status_rows;
 #[cfg(test)]
 mod test_support;
 
-use std::{
-    collections::{HashMap, HashSet},
-    io::IsTerminal as _,
-    process::Command,
-};
+use std::{collections::HashSet, io::IsTerminal as _, process::Command};
 
 use console::style;
 use dialoguer::{theme::ColorfulTheme, Confirm, Select};
@@ -23,7 +19,7 @@ use octocrab::params::pulls::State as PullRequestState;
 use self::{
     approval::{preferred_merge_method, ApprovalOutcome},
     merge_batch::{finish_cancelled_merge, process_merge_batch, MergeSkipped},
-    review::{failing_ci_agent_prompt, has_actions_lock, review_badges},
+    review::{failing_ci_agent_prompt, review_badges},
     status_rows::{should_render_status_rows, PrStatusRows},
 };
 use super::{
@@ -44,7 +40,6 @@ struct ReviewItem {
     owner: String,
     repo_name: String,
     pr: PrInfo,
-    actions_lock_check: Option<Result<bool, Report<AppError>>>,
 }
 
 struct MergeInfo {
@@ -95,7 +90,6 @@ impl App {
                     owner: owner.to_string(),
                     repo_name: repo_name.to_string(),
                     pr,
-                    actions_lock_check: None,
                 }));
             }
 
@@ -111,12 +105,6 @@ impl App {
             }
 
             let pending_statuses = self.fetch_pending_review_statuses(&review_items).await?;
-
-            let mut lockfiles = HashMap::new();
-            for item in &mut review_items {
-                item.actions_lock_check =
-                    Some(has_actions_lock(&self.octocrab, item, &mut lockfiles).await);
-            }
 
             println!("  Found {} Dependabot PR(s):", review_items.len());
             println!("  Review state: {}", style(state_path.as_str()).dim());
@@ -139,13 +127,7 @@ impl App {
                 let pending_status = pending_statuses
                     .get(item.repo.as_str())
                     .and_then(|statuses| statuses.get(&item.pr.number));
-                let badges = review_badges(
-                    previously_reviewed,
-                    pending_status,
-                    item.actions_lock_check
-                        .as_ref()
-                        .expect("lockfile check ran"),
-                );
+                let badges = review_badges(previously_reviewed, pending_status);
 
                 println!(
                     "    {} #{}: {} [{}]\n        {}",
@@ -231,28 +213,6 @@ impl App {
                 PromptChoice::ApproveMergeIncludingNonPassingCi => (Action::ApproveMerge, true),
                 PromptChoice::Action(action) => (action, self.cli.allow_non_passing_ci),
             };
-
-            if matches!(action, Action::ApproveMerge) {
-                let mut lockfiles = HashMap::new();
-                let mut eligible_items = Vec::new();
-
-                for item in review_items {
-                    if has_actions_lock(&self.octocrab, &item, &mut lockfiles).await? {
-                        println!(
-                            "  {} Skipping {}#{}: .github/workflows/actions.lock exists on {}; Dependabot cannot update this lockfile.",
-                            style("⊘").yellow(), item.repo, item.pr.number, item.pr.base_ref_name,
-                        );
-                    } else {
-                        eligible_items.push(item);
-                    }
-                }
-
-                review_items = eligible_items;
-
-                if review_items.is_empty() {
-                    return Ok(performed_action);
-                }
-            }
 
             let approve_merge_context = if matches!(action, Action::ApproveMerge) {
                 let mut contexts = std::collections::HashMap::new();

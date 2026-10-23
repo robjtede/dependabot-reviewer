@@ -143,10 +143,8 @@ pub(super) fn review_item(number: u64, title: &str, ci_status: CiStatus) -> Revi
             url: format!("https://github.com/example/repo/pull/{}", number),
             api_url: format!("https://api.github.com/repos/example/repo/pulls/{number}"),
             base_ref_name: "main".to_string(),
-            head_ref_name: "dependabot/cargo/tokio-1.1.0".to_string(),
             ci_status,
             dep_update: None,
         },
-        actions_lock_check: None,
     }
 }
