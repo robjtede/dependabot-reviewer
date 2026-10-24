@@ -22,6 +22,10 @@ pub(super) enum MergeSkipped {
     Cancelled,
 }
 
+#[derive(Debug, Display)]
+#[display("Dependabot rebase requested; PR is not merged")]
+struct RebaseRequested;
+
 impl App {
     pub(super) async fn handle_merge_failure(
         &self,
@@ -92,26 +96,44 @@ impl App {
         })
         .await;
 
-        match rebase_result {
-            Ok(true) => {
-                if let Some(statuses) = statuses {
-                    statuses.complete(
-                        &info.repo,
-                        info.pr_number,
-                        "Rebase requested; run again after CI completes",
-                    );
-                } else {
-                    println!("  Rebase requested for {}#{}. Run the tool again after Dependabot updates the PR and CI completes.", info.repo, info.pr_number);
-                }
-
-                error.attach("Dependabot rebase requested; PR is not merged")
-            }
-            Ok(false) => error,
-            Err(rebase_error) => error.attach(format!(
-                "Could not request a Dependabot rebase: {rebase_error:?}"
-            )),
-        }
+        finish_rebase_recovery(info, error, statuses, rebase_result)
     }
+}
+
+fn finish_rebase_recovery(
+    info: &MergeInfo,
+    error: Report<AppError>,
+    statuses: Option<&PrStatusRows>,
+    rebase_result: Result<bool, Report<AppError>>,
+) -> Report<AppError> {
+    match rebase_result {
+        Ok(true) => {
+            if let Some(statuses) = statuses {
+                statuses.complete(
+                    &info.repo,
+                    info.pr_number,
+                    "Rebase requested; run again after CI completes",
+                );
+            } else {
+                println!("  Rebase requested for {}#{}. Run the tool again after Dependabot updates the PR and CI completes.", info.repo, info.pr_number);
+            }
+
+            error.attach(RebaseRequested)
+        }
+        Ok(false) => error,
+        Err(rebase_error) => error.attach(format!(
+            "Could not request a Dependabot rebase: {rebase_error:?}"
+        )),
+    }
+}
+
+pub(super) fn is_reportable_merge_failure(error: &Report<AppError>) -> bool {
+    error.downcast_ref::<RebaseRequested>().is_none()
+        && error.downcast_ref::<MergeWaitCancelled>().is_none()
+        && !matches!(
+            error.downcast_ref::<MergeSkipped>(),
+            Some(MergeSkipped::Cancelled)
+        )
 }
 
 async fn offer_rebase(
@@ -352,6 +374,13 @@ mod tests {
 
             assert!(requested, "PR should get a rebase request: {message}");
             assert!(prompted);
+
+            let error = finish_rebase_recovery(&merge_info(), error, None, Ok(requested));
+            assert!(
+                !is_reportable_merge_failure(&error),
+                "rebase recovery must not fail the run: {error:?}"
+            );
+
             let requests = server.await.expect("test server");
             assert_eq!(requests.len(), 3);
             assert!(requests
@@ -433,6 +462,9 @@ mod tests {
         assert!(!requested);
         assert!(prompted);
         assert_eq!(server.await.expect("test server").len(), 2);
+
+        let error = finish_rebase_recovery(&merge_info(), error, None, Ok(requested));
+        assert!(is_reportable_merge_failure(&error));
     }
 
     #[tokio::test]
@@ -549,6 +581,15 @@ mod tests {
         assert_matches!(error.current_context(), AppError::Comment);
         assert!(format!("{error:?}").contains("Resource not accessible"));
         assert_eq!(server.await.expect("test server").len(), 3);
+
+        let error = finish_rebase_recovery(
+            &merge_info(),
+            Report::new(AppError::ApproveMerge),
+            None,
+            Err(error),
+        );
+        assert!(is_reportable_merge_failure(&error));
+        assert!(format!("{error:?}").contains("Resource not accessible"));
     }
 
     #[tokio::test]

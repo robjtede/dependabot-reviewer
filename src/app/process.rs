@@ -18,7 +18,7 @@ use octocrab::params::pulls::State as PullRequestState;
 
 use self::{
     approval::{preferred_merge_method, ApprovalOutcome},
-    merge_batch::{finish_cancelled_merge, process_merge_batch, MergeSkipped},
+    merge_batch::{finish_cancelled_merge, is_reportable_merge_failure, process_merge_batch},
     review::{failing_ci_agent_prompt, review_badges},
     status_rows::{should_render_status_rows, PrStatusRows},
 };
@@ -660,13 +660,7 @@ impl App {
                 processed_pr_urls.extend(review_items.into_iter().map(|item| item.pr.api_url));
             }
 
-            merge_failures.retain(|(_, error)| {
-                error.downcast_ref::<MergeWaitCancelled>().is_none()
-                    && !matches!(
-                        error.downcast_ref::<MergeSkipped>(),
-                        Some(MergeSkipped::Cancelled)
-                    )
-            });
+            merge_failures.retain(|(_, error)| is_reportable_merge_failure(error));
 
             if !merge_failures.is_empty() {
                 let mut report = Report::new(AppError::ApproveMerge).attach(format!(
