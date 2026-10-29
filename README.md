@@ -68,6 +68,8 @@ dependabot-reviewer --org owner --repo owner/repository --action approve-merge -
 
 Use `--action close` to close selected pull requests. Add `--dry-run` to preview the action first.
 
+Select **Rebase** to choose **Rebase All**, **Rebase Some Repos**, or **Rebase Some PRs**. Use Space to select repositories or pull requests, then press Enter to confirm. Pull requests appear as `repo: title`. After the rebase requests are sent, the tool returns to the PR list. Select **Refresh PR State** to check CI until it completes. Use `--action rebase` to request rebases for all PRs in the selected repositories and exit.
+
 After processing, interactive runs offer to remove GitHub notifications for the PRs in the processed batch by marking them as done. The default answer is **No**. If you accept, the tool attempts to remove all matching notifications, including read notifications. Cleanup failures are reported and do not change the PR action result. Dry runs and non-interactive runs do not remove notifications.
 
 GitHub Actions updates use the normal approval and merge checks, including when the target branch contains `.github/workflows/actions.lock`. Dependabot updates the workflow and its lockfile entries in the same pull request.

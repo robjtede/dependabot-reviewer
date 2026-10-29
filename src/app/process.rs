@@ -1,6 +1,7 @@
 mod approval;
 mod dry_run;
 mod merge_batch;
+mod rebase;
 mod review;
 mod status_rows;
 
@@ -19,6 +20,7 @@ use octocrab::params::pulls::State as PullRequestState;
 use self::{
     approval::{preferred_merge_method, ApprovalOutcome},
     merge_batch::{finish_cancelled_merge, is_reportable_merge_failure, process_merge_batch},
+    rebase::select_rebase_items,
     review::{failing_ci_agent_prompt, review_badges},
     status_rows::{should_render_status_rows, PrStatusRows},
 };
@@ -213,6 +215,16 @@ impl App {
                 PromptChoice::ApproveMergeIncludingNonPassingCi => (Action::ApproveMerge, true),
                 PromptChoice::Action(action) => (action, self.cli.allow_non_passing_ci),
             };
+
+            if matches!(action, Action::Rebase) && self.cli.action.is_none() {
+                review_items = select_rebase_items(review_items)?;
+
+                if review_items.is_empty() {
+                    println!("  No PRs selected for rebase.");
+                    println!();
+                    continue;
+                }
+            }
 
             let approve_merge_context = if matches!(action, Action::ApproveMerge) {
                 let mut contexts = std::collections::HashMap::new();
@@ -683,7 +695,9 @@ impl App {
                 println!("  No unreviewed PRs to open.");
             }
 
-            if self.cli.action.is_some() || !matches!(action, Action::OpenUnreviewedInBrowser) {
+            if self.cli.action.is_some()
+                || !matches!(action, Action::OpenUnreviewedInBrowser | Action::Rebase)
+            {
                 return Ok(performed_action);
             }
 

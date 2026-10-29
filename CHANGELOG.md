@@ -38,12 +38,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Other
 
-- *(deps)* bump console from 0.16.4 to 0.16.6
+- _(deps)_ bump console from 0.16.4 to 0.16.6
 - Merge pull request #71 from robjtede/dependabot/cargo/toml-1.1.6spec-1.1.0
 - Merge pull request #72 from robjtede/dependabot/cargo/camino-1.2.6
 - Merge pull request #73 from robjtede/dependabot/cargo/impl-more-0.3.8
 - Merge pull request #74 from robjtede/dependabot/cargo/octocrab-0.54.2
-- *(deps)* bump clap from 4.6.6 to 4.6.7
+- _(deps)_ bump clap from 4.6.6 to 4.6.7
 
 ## [0.1.8](https://github.com/robjtede/dependabot-reviewer/compare/v0.1.7...v0.1.8) - 2026-09-17
 
