@@ -139,10 +139,12 @@ impl<'a> AsyncMerge<'a> {
             .await
             .change_context(AppError::ApproveMerge)
             .attach(AsyncMergeError::Unconfirmed)?;
+        let status = response.status();
         let response = octocrab::map_github_error(response)
             .await
             .change_context(AppError::ApproveMerge)
             .attach(AsyncMergeError::Unconfirmed)
+            .attach(status)
             .attach(format!("Could not confirm the merge result at {route}"))?;
         let result = MergeResponse::from_response(response)
             .await

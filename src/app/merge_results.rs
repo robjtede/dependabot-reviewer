@@ -1,9 +1,9 @@
-use std::{future::Future, io, time::Duration};
+use std::{backtrace::Backtrace, future::Future, io, time::Duration};
 
 use derive_more::Display;
 use error_stack::{Report, ResultExt as _};
 use futures_util::StreamExt as _;
-use octocrab::Octocrab;
+use octocrab::{FromResponse as _, GraphqlResponse, Octocrab};
 use serde::Deserialize;
 
 use super::async_merge::{AsyncMerge, AsyncMergeError, MergeOutcome, MergeStatus};
@@ -217,6 +217,13 @@ pub(crate) fn cancelled(result: io::Result<()>) -> Report<AppError> {
 }
 
 pub(crate) fn retryable_poll_error(error: &Report<AppError>) -> bool {
+    if error
+        .downcast_ref::<http::StatusCode>()
+        .is_some_and(|status| status.is_server_error() || status.as_u16() == 429)
+    {
+        return true;
+    }
+
     match error.downcast_ref::<octocrab::Error>() {
         Some(octocrab::Error::GitHub { source, .. }) => {
             source.status_code.is_server_error()
@@ -237,11 +244,30 @@ pub(crate) async fn fetch_merge_progress(
 ) -> Result<MergeProgress, Report<AppError>> {
     let number = i64::try_from(number).change_context(AppError::GitHubApi)?;
     let payload = progress_request(owner, repo, number);
-    let data: ProgressData = octocrab
-        .graphql(&payload)
+
+    // Read the response directly to keep the HTTP status if the error body is not JSON.
+    let response = octocrab
+        ._post("/graphql", Some(&payload))
         .await
         .change_context(AppError::GitHubApi)
         .attach(AsyncMergeError::Unconfirmed)?;
+    let status = response.status();
+    let data = async {
+        let response = octocrab::map_github_error(response).await?;
+
+        match GraphqlResponse::<ProgressData>::from_response(response).await? {
+            GraphqlResponse::Ok(response) => Ok(response.data),
+            GraphqlResponse::Err(response) => Err(octocrab::Error::Graphql {
+                source: response.errors.into(),
+                backtrace: Backtrace::capture(),
+            }),
+        }
+    }
+    .await
+    .change_context(AppError::GitHubApi)
+    .attach(AsyncMergeError::Unconfirmed)
+    .attach(status)?;
+
     let pr = data
         .repository
         .and_then(|repository| repository.pull_request)

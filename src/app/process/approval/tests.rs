@@ -315,6 +315,9 @@ async fn temporary_poll_errors_retry_without_resubmitting_the_merge() {
     let (octocrab, server) = rebase_test_client(vec![
         (202, pending_merge("merge", "direct_merge", "head", false)),
         (503, r#"{"message":"Service unavailable"}"#.to_owned()),
+        (502, "<html>Bad Gateway</html>".to_owned()),
+        (503, String::new()),
+        (429, "Too many requests".to_owned()),
         (200, r#"{"status":"merged","details":{}}"#.to_owned()),
     ])
     .await;
@@ -349,7 +352,7 @@ async fn temporary_poll_errors_retry_without_resubmitting_the_merge() {
     );
 
     let requests = server.await.expect("test server");
-    assert_eq!(requests.len(), 3);
+    assert_eq!(requests.len(), 6);
     assert!(requests
         .iter()
         .skip(1)
@@ -432,14 +435,69 @@ async fn results_screen_polls_ci_queue_and_the_actual_merge() {
 }
 
 #[tokio::test]
+async fn results_screen_retries_non_json_errors_until_the_merge_is_confirmed() {
+    let merged = r#"{"data":{"repository":{"pullRequest":{"state":"MERGED","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","mergeQueueEntry":null,"autoMergeRequest":null,"commits":{"nodes":[]}}}}}"#;
+    let (octocrab, server) = rebase_test_client(vec![
+        (503, "Service unavailable".to_owned()),
+        (200, merged.to_owned()),
+    ])
+    .await;
+    let info = merge_info();
+    let mut messages = Vec::new();
+
+    let results = monitor_merge_results(
+        &[&info],
+        async |info| {
+            fetch_merge_progress(&octocrab, &info.owner, &info.repo_name, info.pr_number).await
+        },
+        |_, progress| messages.push(progress.message().to_owned()),
+        async |_, error| error,
+        std::future::pending(),
+    )
+    .await;
+
+    assert!(
+        results.failures.is_empty(),
+        "{:?}",
+        results.failures.first().map(|(_, error)| error)
+    );
+    assert!(results.cancelled.is_empty());
+    assert_eq!(
+        messages,
+        [
+            "Status unavailable; retrying (Ctrl+C to stop waiting)",
+            "Merged"
+        ]
+    );
+
+    let requests = server.await.expect("test server");
+    assert_eq!(requests.len(), 2);
+    assert!(requests
+        .iter()
+        .all(|request| request.starts_with("POST /graphql ")));
+}
+
+#[tokio::test]
 async fn results_screen_keeps_fetch_errors_distinct_from_merge_failures() {
-    for (status, message, retryable) in [
-        (403, "API rate limit exceeded", true),
-        (403, "Resource not accessible", false),
-        (503, "Service unavailable", true),
+    for (status, body, retryable) in [
+        (403, r#"{"message":"API rate limit exceeded"}"#, true),
+        (403, r#"{"message":"Resource not accessible"}"#, false),
+        (503, r#"{"message":"Service unavailable"}"#, true),
+        (502, "<html>Bad Gateway</html>", true),
+        (503, "", true),
+        (429, "Too many requests", true),
+        (401, "Unauthorized", false),
+        (403, "Forbidden", false),
+        (404, "Not found", false),
+        (200, "Invalid JSON", false),
+        (200, r#"{"data":{"repository":{}}}"#, false),
+        (
+            200,
+            r#"{"errors":[{"message":"Resource not accessible"}]}"#,
+            false,
+        ),
     ] {
-        let (octocrab, server) =
-            rebase_test_client(vec![(status, format!(r#"{{"message":"{message}"}}"#))]).await;
+        let (octocrab, server) = rebase_test_client(vec![(status, body.to_owned())]).await;
 
         let error = fetch_merge_progress(&octocrab, "example", "repo", 12)
             .await
@@ -451,7 +509,8 @@ async fn results_screen_keeps_fetch_errors_distinct_from_merge_failures() {
         );
         assert_eq!(
             crate::app::merge_results::retryable_poll_error(&error),
-            retryable
+            retryable,
+            "HTTP {status}: {body}"
         );
         assert_eq!(server.await.expect("test server").len(), 1);
     }
