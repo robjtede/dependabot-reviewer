@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+## [0.1.12](https://github.com/robjtede/dependabot-reviewer/compare/v0.1.11...v0.1.12) - 2026-10-30
+
+### Added
+
+- select pull requests for interactive rebasing
+
+### Fixed
+
+- retry temporary merge polling errors
+- treat successful rebase recovery as non-fatal
+
+### Other
+
+- *(deps)* bump octocrab from 0.54.4 to 0.54.5
+- Merge pull request #96 from robjtede/dependabot/cargo/toml-1.1.8spec-1.1.0
+- Merge pull request #97 from robjtede/dependabot/cargo/octocrab-0.54.4
+- Merge pull request #98 from robjtede/dependabot/cargo/impl-more-0.3.10
+
 ## [0.1.11](https://github.com/robjtede/dependabot-reviewer/compare/v0.1.10...v0.1.11) - 2026-10-23
 
 ### Fixed
