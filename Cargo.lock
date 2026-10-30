@@ -384,7 +384,7 @@ dependencies = [
 
 [[package]]
 name = "dependabot-reviewer"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "camino",
  "clap",
