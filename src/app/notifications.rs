@@ -1,4 +1,7 @@
-use std::{collections::HashSet, io::IsTerminal as _};
+use std::{
+    collections::{HashMap, HashSet},
+    io::IsTerminal as _,
+};
 
 use dialoguer::{theme::ColorfulTheme, Confirm};
 use error_stack::Report;
@@ -34,9 +37,11 @@ impl App {
         }
 
         self.cleanup_notifications(pr_urls, || {
+            println!();
+
             Confirm::with_theme(&ColorfulTheme::default())
                 .with_prompt(format!(
-                    "Remove GitHub notifications for {} PR(s) from this run (mark as done)?",
+                    "Remove GitHub notifications for confirmed merged PRs among {} PR(s) from this run (mark as done)?",
                     pr_urls.len()
                 ))
                 .default(false)
@@ -83,7 +88,7 @@ async fn clear_pr_notifications(
         return cleanup;
     }
 
-    let mut thread_ids = HashSet::new();
+    let mut thread_ids = HashMap::new();
 
     let mut page = match octocrab
         .get::<Page<Notification>, _, _>(
@@ -116,7 +121,9 @@ async fn clear_pr_notifications(
                             .as_deref()
                             .is_some_and(|url| pr_urls.contains(url))
                 })
-                .map(|notification| notification.id),
+                .filter_map(|notification| {
+                    notification.subject.url.map(|url| (notification.id, url))
+                }),
         );
 
         match octocrab.get_page::<Notification>(&page.next).await {
@@ -133,7 +140,46 @@ async fn clear_pr_notifications(
         }
     }
 
-    for thread_id in thread_ids {
+    let mut merged_prs = HashMap::new();
+
+    for (thread_id, pr_url) in thread_ids {
+        let merged = if let Some(merged) = merged_prs.get(&pr_url) {
+            *merged
+        } else {
+            #[derive(Deserialize)]
+            struct MergeState {
+                merged: Option<bool>,
+            }
+
+            // Use the configured API host, including in tests and on GitHub Enterprise.
+            let route = pr_url.find("/repos/").and_then(|index| pr_url.get(index..));
+            let Some(route) = route else {
+                cleanup.errors.push(
+                    Report::new(AppError::GitHubApi).attach(format!("Invalid PR URL: {pr_url}")),
+                );
+                continue;
+            };
+
+            let merged = match octocrab.get::<MergeState, _, _>(route, None::<&()>).await {
+                Ok(state) => state.merged == Some(true),
+                Err(error) => {
+                    cleanup.errors.push(
+                        Report::new(error)
+                            .change_context(AppError::GitHubApi)
+                            .attach(format!("Could not confirm merge for {pr_url}")),
+                    );
+                    false
+                }
+            };
+
+            merged_prs.insert(pr_url, merged);
+            merged
+        };
+
+        if !merged {
+            continue;
+        }
+
         let route = format!("/notifications/threads/{thread_id}");
         let result = async {
             let response = octocrab._delete(route.as_str(), None::<&()>).await?;
@@ -243,6 +289,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn keeps_notifications_when_merge_lookup_fails() {
+        let selected = notification(
+            1,
+            "PullRequest",
+            "https://api.github.com/repos/example/repo/pulls/12",
+        );
+        let (octocrab, server) = notification_test_client(vec![
+            (200, String::new(), format!("[{selected}]")),
+            (403, String::new(), r#"{"message":"Forbidden"}"#.to_owned()),
+        ])
+        .await;
+
+        let result = clear_pr_notifications(&octocrab, &pr_urls()).await;
+        let requests = server.await.expect("server");
+
+        assert!(requests
+            .iter()
+            .all(|request| !request.starts_with("DELETE ")));
+        assert_eq!(result.removed, 0);
+        assert_eq!(result.errors.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn keeps_notifications_without_a_confirmed_merge() {
+        for body in [r#"{"merged":false}"#, r#"{"merged":null}"#, "{}"] {
+            let selected = notification(
+                1,
+                "PullRequest",
+                "https://api.github.com/repos/example/repo/pulls/12",
+            );
+            let (octocrab, server) = notification_test_client(vec![
+                (200, String::new(), format!("[{selected}]")),
+                (200, String::new(), body.to_owned()),
+            ])
+            .await;
+
+            let result = clear_pr_notifications(&octocrab, &pr_urls()).await;
+            let requests = server.await.expect("server");
+
+            assert!(requests
+                .iter()
+                .all(|request| !request.starts_with("DELETE ")));
+            assert_eq!(result.removed, 0);
+        }
+    }
+
+    #[tokio::test]
     async fn removes_only_matching_pr_threads_after_fetching_all_pages() {
         let selected = notification(
             1,
@@ -272,6 +365,7 @@ mod tests {
                 format!("[{selected},{other_repo},{issue},{missing_url}]"),
             ),
             (200, String::new(), format!("[{selected},{second_match}]")),
+            (200, String::new(), r#"{"merged":true}"#.to_owned()),
             (204, String::new(), String::new()),
             (204, String::new(), String::new()),
         ])
@@ -299,7 +393,7 @@ mod tests {
 
         let deletions = requests
             .iter()
-            .skip(2)
+            .skip(3)
             .map(|request| request.lines().next().expect("request line"))
             .collect::<HashSet<_>>();
         assert_eq!(
@@ -325,6 +419,7 @@ mod tests {
         );
         let (octocrab, server) = notification_test_client(vec![
             (200, String::new(), format!("[{first},{second}]")),
+            (200, String::new(), r#"{"merged":true}"#.to_owned()),
             (403, String::new(), r#"{"message":"Forbidden"}"#.to_owned()),
             (204, String::new(), String::new()),
         ])
@@ -335,7 +430,7 @@ mod tests {
         assert_eq!(result.removed, 1);
         assert_eq!(result.errors.len(), 1);
         assert!(format!("{:?}", result.errors).contains("Forbidden"));
-        assert_eq!(server.await.expect("test server").len(), 3);
+        assert_eq!(server.await.expect("test server").len(), 4);
     }
 
     #[tokio::test]
@@ -356,6 +451,7 @@ mod tests {
                 String::new(),
                 r#"{"message":"Page failed"}"#.to_owned(),
             ),
+            (200, String::new(), r#"{"merged":true}"#.to_owned()),
             (204, String::new(), String::new()),
         ])
         .await;
@@ -435,6 +531,7 @@ mod tests {
         );
         let (octocrab, server) = notification_test_client(vec![
             (200, String::new(), format!("[{selected}]")),
+            (200, String::new(), r#"{"merged":true}"#.to_owned()),
             (204, String::new(), String::new()),
         ])
         .await;

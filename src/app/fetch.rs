@@ -74,7 +74,7 @@ impl App {
             .ok_or_else(|| Report::new(AppError::InvalidInput))
             .attach_with(|| format!("Invalid repo format: {}", repo))?;
 
-        let prs_page = discovery_get::<octocrab::Page<octocrab::models::pulls::PullRequest>>(
+        let prs_page = discovery_get::<octocrab::models::pulls::PullRequest>(
             &self.octocrab,
             &format!("/repos/{owner}/{repo_name}/pulls?state=open"),
         )
@@ -148,7 +148,7 @@ impl App {
                 let query = format!("org:{} author:dependabot[bot] is:pr is:open", org);
                 let parameters =
                     serde_urlencoded::to_string([("q", query)]).change_context(AppError::Search)?;
-                let page = discovery_get::<octocrab::Page<octocrab::models::issues::Issue>>(
+                let page = discovery_get::<octocrab::models::issues::Issue>(
                     &octocrab,
                     &format!("/search/issues?{parameters}"),
                 )
@@ -178,7 +178,22 @@ impl App {
     }
 }
 
-async fn discovery_get<R: octocrab::FromResponse>(
+async fn discovery_get<T: serde::de::DeserializeOwned>(
+    octocrab: &octocrab::Octocrab,
+    route: &str,
+) -> Result<octocrab::Page<T>, Report<AppError>> {
+    let mut page: octocrab::Page<T> = discovery_page(octocrab, route).await?;
+
+    while let Some(next) = page.next.take() {
+        let next_page: octocrab::Page<T> = discovery_page(octocrab, &next.to_string()).await?;
+        page.items.extend(next_page.items);
+        page.next = next_page.next;
+    }
+
+    Ok(page)
+}
+
+async fn discovery_page<R: octocrab::FromResponse>(
     octocrab: &octocrab::Octocrab,
     route: &str,
 ) -> Result<R, Report<AppError>> {
@@ -283,6 +298,37 @@ mod tests {
         let result = discovery_get(&octocrab, "/search/issues?q=test").await;
         server.await.expect("test server");
         result
+    }
+
+    #[tokio::test]
+    async fn discovery_follows_next_pages() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let address = listener.local_addr().expect("address");
+        let server = tokio::spawn(async move {
+            for (body, next) in [(r#"["first"]"#, true), (r#"["second"]"#, false)] {
+                let (mut socket, _) = listener.accept().await.expect("accept");
+                let mut buffer = [0; 4096];
+                socket.read(&mut buffer).await.expect("request");
+                let link = if next {
+                    format!("Link: <http://{address}/items?page=2>; rel=\"next\"\r\n")
+                } else {
+                    String::new()
+                };
+                let response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n{link}\r\n{body}", body.len());
+                socket
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("response");
+            }
+        });
+        let octocrab = octocrab::Octocrab::builder()
+            .base_uri(format!("http://{address}"))
+            .expect("URI")
+            .build()
+            .expect("client");
+        let page: octocrab::Page<String> = discovery_get(&octocrab, "/items").await.expect("pages");
+        assert_eq!(page.items, ["first", "second"]);
+        server.await.expect("server");
     }
 
     #[tokio::test]
