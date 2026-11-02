@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+## [0.1.13](https://github.com/robjtede/dependabot-reviewer/compare/v0.1.12...v0.1.13) - 2026-11-02
+
+### Other
+
+- *(deps)* update locked Rust dependencies
+
 ## [0.1.12](https://github.com/robjtede/dependabot-reviewer/compare/v0.1.11...v0.1.12) - 2026-11-02
 
 ### Added
