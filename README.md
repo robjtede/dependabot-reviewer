@@ -50,7 +50,9 @@ Edit the configuration file with your preferred editor:
 EDITOR="code --wait" dependabot-reviewer --edit-config
 ```
 
-This opens `state.toml` in the application's config directory, then exits. It creates a default file if none exists. GitHub authentication is not required. `EDITOR` can include arguments and quoted paths. If `EDITOR` is not set, the command prints a message and the configuration file path, then exits.
+With `EDITOR` set, this creates `state.toml` in the application's config directory if needed, opens it in the editor, then exits. GitHub authentication is not required. `EDITOR` can include arguments and quoted paths.
+
+If `EDITOR` is not set, the command prints a message and the configuration file path, then exits without creating the file.
 
 ## Use
 
