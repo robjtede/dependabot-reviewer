@@ -149,6 +149,12 @@ jobs:
         with:
           arguments: .#ci-release
 
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ fromJSON(needs.release.outputs.releases)[0].tag }}
+        run: gh release edit "$RELEASE_TAG" --draft=false
+
       - name: Comment on release PR
         env:
           GH_TOKEN: ${{ github.token }}
