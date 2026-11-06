@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+## [0.1.14](https://github.com/robjtede/dependabot-reviewer/compare/v0.1.13...v0.1.14) - 2026-11-06
+
+### Fixed
+
+- retry stalled merge status requests
+
+### Other
+
+- *(deps)* bump octocrab from 0.54.5 to 0.54.6
+
 ## [0.1.13](https://github.com/robjtede/dependabot-reviewer/compare/v0.1.12...v0.1.13) - 2026-11-02
 
 ### Other
