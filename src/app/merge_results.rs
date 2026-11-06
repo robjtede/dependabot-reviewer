@@ -10,6 +10,7 @@ use super::async_merge::{AsyncMerge, AsyncMergeError, MergeOutcome, MergeStatus}
 use crate::error::AppError;
 
 pub(crate) const POLL_INTERVAL: Duration = Duration::from_secs(2);
+const STATUS_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Display)]
 #[display("Stopped waiting for merge results. GitHub can still process submitted requests.")]
@@ -148,7 +149,16 @@ async fn poll_target<'a, T>(
     }
 
     let progress = match permits.acquire().await {
-        Ok(_permit) => poll(target.item).await,
+        Ok(_permit) => {
+            // Bound each status request, including response body reads. A stalled
+            // request must not keep the last queue status on screen indefinitely.
+            match tokio::time::timeout(STATUS_REQUEST_TIMEOUT, poll(target.item)).await {
+                Ok(progress) => progress,
+                Err(_) => Ok(MergeProgress::Waiting(
+                    "Status request timed out; retrying (Ctrl+C to stop waiting)".to_owned(),
+                )),
+            }
+        }
         Err(error) => Err(Report::new(error).change_context(AppError::GitHubApi)),
     };
 
@@ -631,6 +641,39 @@ mod tests {
             results.cancelled.into_iter().copied().collect::<Vec<_>>(),
             [1]
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retries_a_stalled_status_request_until_the_pr_is_merged() {
+        let pr = 1036;
+        let rounds = Cell::new(0);
+        let mut messages = Vec::new();
+
+        let results = tokio::time::timeout(
+            Duration::from_secs(120),
+            monitor_merge_results(
+                &[&pr],
+                async |_| {
+                    rounds.set(rounds.get() + 1);
+
+                    match rounds.get() {
+                        1 => Ok(MergeProgress::Waiting("In merge queue".to_owned())),
+                        2 => pending().await,
+                        _ => Ok(MergeProgress::Merged),
+                    }
+                },
+                |_, progress| messages.push(progress.message().to_owned()),
+                async |_, error| error,
+                pending(),
+            ),
+        )
+        .await
+        .expect("a stalled status request must not prevent later merge detection");
+
+        assert!(results.failures.is_empty());
+        assert!(results.cancelled.is_empty());
+        assert_eq!(messages.last().map(String::as_str), Some("Merged"));
+        assert!(messages.iter().any(|message| message.contains("retrying")));
     }
 
     #[tokio::test]
