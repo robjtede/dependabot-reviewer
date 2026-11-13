@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+## [0.1.14](https://github.com/robjtede/dependabot-reviewer/compare/v0.1.13...v0.1.14) - 2026-11-13
+
+### Fixed
+
+- retry stalled merge status requests
+
+### Other
+
+- Merge pull request #115 from robjtede/dependabot/cargo/octocrab-0.54.9
+- *(deps)* bump toml from 1.1.8+spec-1.1.0 to 1.2.0+spec-1.1.0
+- *(deps)* bump octocrab from 0.54.6 to 0.54.9
+- *(deps)* bump octocrab from 0.54.5 to 0.54.6
+
 ## [0.1.13](https://github.com/robjtede/dependabot-reviewer/compare/v0.1.12...v0.1.13) - 2026-11-02
 
 ### Other
