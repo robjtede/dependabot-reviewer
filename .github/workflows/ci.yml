@@ -22,24 +22,24 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
 
       - name: Set up Rust toolchain
         id: rust
         background: true
-        uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2.0.1
+        uses: actions-rust-lang/setup-rust-toolchain@v2.0.1
         with:
           components: clippy
 
       - name: Install Nix
-        uses: nixbuild/nix-quick-install-action@9f63be77f412a248c9d9a65a4c82cf066cdf8f0c # v35
+        uses: nixbuild/nix-quick-install-action@v35
 
       - name: Enter Nix devshell
         id: devshell
         background: true
-        uses: nicknovitski/nix-develop@9be7cfb4b10451d3390a75dc18ad0465bed4932a # v1.2.1
+        uses: nicknovitski/nix-develop@v1.2.1
         with:
           arguments: .#ci
 
@@ -47,7 +47,7 @@ jobs:
         wait: rust
 
       - name: Install just and cargo-nextest
-        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        uses: taiki-e/install-action@v2.90.3
         with:
           tool: just,cargo-nextest
 
@@ -66,12 +66,12 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
 
       - name: Scan workflows for security issues
-        uses: zizmorcore/zizmor-action@45d7276c9ca790aabd705e31ca99c6185c3e76dd # v0.8.1
+        uses: zizmorcore/zizmor-action@v0.8.1
         with:
           advanced-security: false
           annotations: true
