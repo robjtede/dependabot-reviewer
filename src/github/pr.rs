@@ -4,6 +4,7 @@ use crate::github::CiStatus;
 pub struct DepUpdate {
     pub dep_type: String,
     pub dep_name: String,
+    pub from_version: String,
     pub to_version: String,
 }
 
@@ -49,6 +50,7 @@ pub fn parse_dep_update(title: &str, head_ref: &str) -> Option<DepUpdate> {
     Some(DepUpdate {
         dep_type,
         dep_name,
+        from_version: from_version.to_owned(),
         to_version,
     })
 }

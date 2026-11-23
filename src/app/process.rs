@@ -1,4 +1,5 @@
 mod approval;
+mod browser;
 mod dry_run;
 mod merge_batch;
 mod rebase;
@@ -268,13 +269,26 @@ impl App {
             })
             .flatten();
 
-            for item in &review_items {
+            let duplicates = if matches!(action, Action::OpenUnreviewedInBrowser) {
+                browser::duplicates(review_items.iter().map(|item| item.pr.dep_update.as_ref()))
+            } else {
+                HashSet::new()
+            };
+
+            for (index, item) in review_items.iter().enumerate() {
                 let previously_reviewed = item
                     .pr
                     .dep_update
                     .as_ref()
                     .map(|dep_update| review_state.is_previously_reviewed(dep_update))
                     .unwrap_or(false);
+
+                if !previously_reviewed && duplicates.contains(&index) {
+                    if let Some(statuses) = &pr_statuses {
+                        statuses.finish_skipped(&item.repo, item.pr.number, "Duplicate update");
+                    }
+                    continue;
+                }
 
                 if self.cli.dry_run {
                     self.preview_action(
@@ -466,9 +480,20 @@ impl App {
             }
 
             if !merge_infos.is_empty() {
-                let non_previously_reviewed: Vec<_> = merge_infos
+                let mut non_previously_reviewed: Vec<_> = merge_infos
                     .iter()
                     .filter(|info| !info.previously_reviewed)
+                    .collect();
+
+                let duplicates = browser::duplicates(
+                    non_previously_reviewed
+                        .iter()
+                        .map(|info| info.dep_update.as_ref()),
+                );
+                non_previously_reviewed = non_previously_reviewed
+                    .into_iter()
+                    .enumerate()
+                    .filter_map(|(index, info)| (!duplicates.contains(&index)).then_some(info))
                     .collect();
 
                 if !non_previously_reviewed.is_empty()
